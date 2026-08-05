@@ -125,15 +125,16 @@ def parse_time_input(user_text: str):
         return f"{h:02d}:{min_val:02d}"
     return None
 
-def create_quick_reply():
-    """タップで選択できるクイックリプライボタンを作成"""
+def create_quick_reply(station_name: str = None):
+    """駅名を埋め込んだ動的クイックリプライを作成"""
+    prefix = f"{station_name} " if station_name else ""
     return QuickReply(
         items=[
             QuickReplyItem(
-                action=MessageAction(label="🚃 目黒方面", text="目黒方面")
+                action=MessageAction(label="🚃 目黒方面", text=f"{prefix}目黒方面")
             ),
             QuickReplyItem(
-                action=MessageAction(label="🚃 浦和美園方面", text="浦和美園方面")
+                action=MessageAction(label="🚃 浦和美園方面", text=f"{prefix}浦和美園方面")
             ),
             QuickReplyItem(
                 action=LocationAction(label="📍 現在地から検索")
@@ -337,6 +338,9 @@ def handle_message(event):
         direction_key=direction_key
     )
 
+    # 検索対象となった駅名を特定（入力がなかった場合は赤羽岩淵）
+    current_station_name = matched_station["name"] if matched_station else "赤羽岩淵"
+
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
@@ -345,7 +349,7 @@ def handle_message(event):
                 messages=[
                     TextMessage(
                         text=reply_text,
-                        quick_reply=create_quick_reply()  # クイックリプライ追加
+                        quick_reply=create_quick_reply(station_name=current_station_name)
                     )
                 ]
             )
@@ -371,7 +375,7 @@ def handle_location(event):
                 messages=[
                     TextMessage(
                         text=reply_text,
-                        quick_reply=create_quick_reply()  # クイックリプライ追加
+                        quick_reply=create_quick_reply(station_name=nearest_station["name"])
                     )
                 ]
             )
