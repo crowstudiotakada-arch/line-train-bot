@@ -18,14 +18,10 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# ==============================================================================
-# 0. タイムゾーン設定（日本標準時 JST = UTC + 9時間）
-# ==============================================================================
+# タイムゾーン設定（JST）
 JST = timezone(timedelta(hours=9))
 
-# ==============================================================================
-# 1. 各種APIキー設定（環境変数または直接入力）
-# ==============================================================================
+# APIキー設定
 ODPT_CONSUMER_KEY = os.environ.get("ODPT_CONSUMER_KEY", "uwvu4a98yybp82h2i7w1j2s9kozuxl7p6a4yyuempfpgtdbwbf2v6z2gsj551ff8")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "YOUR_LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "YOUR_LINE_CHANNEL_ACCESS_TOKEN")
@@ -33,9 +29,6 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "YOUR_LI
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# ==============================================================================
-# 2. 定数・駅名マッピング定義
-# ==============================================================================
 ODPT_API_URL = "https://api.odpt.org/api/v4/odpt:StationTimetable"
 STATION_ID = "odpt.Station:TokyoMetro.Namboku.AkabaneIwabuchi"
 RAIL_DIRECTION_ID = "odpt.RailDirection:TokyoMetro.Meguro"
@@ -54,22 +47,14 @@ STATION_NAME_MAP = {
     "Kikuna": "菊名"
 }
 
-# ==============================================================================
-# 3. 両数・担当会社・当駅始発判定ロジック
-# ==============================================================================
 def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool) -> dict:
-    """列車番号・行き先・始発フラグから編成両数（8両/6両）と案内を判定"""
     train_number = train_number.upper()
     destination_display = STATION_NAME_MAP.get(destination_raw, destination_raw)
 
     match = re.search(r"([A-Z])$", train_number)
     suffix = match.group(1) if match else ""
 
-    cars = "不明"
-    company = "不明"
     recommendations = []
-
-    # 当駅始発の場合の特別注記
     if is_origin:
         recommendations.append("✨【当駅始発】座れる可能性大！")
 
@@ -91,6 +76,7 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
         recommendations.append("メトロ車（順次8両化中）")
     else:
         company = "その他"
+        cars = "不明"
 
     sotetsu_keywords = ["海老名", "湘南台", "西谷", "相鉄", "ebina", "shonandai", "nishiya", "sotetsu"]
     search_target = f"{destination_display} {destination_raw}".lower()
@@ -109,12 +95,8 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
         "recommendation": " / ".join(recommendations) if recommendations else "通常運行",
     }
 
-# ==============================================================================
-# 4. 時刻表データ取得＆LINE用返信テキスト生成
-# ==============================================================================
-def build_timetable_message() -> str:
-    """ODPT APIから時刻表を取得し、当駅始発判定を含めた最新の発車案内を作成"""
-    if not ODPT_CONSUMER_KEY or "ここに" in ODPT_CONSUMER_KEY:
+def build_timetable_message(target_time_str: str = None) -> str:
+    if not ODPT_CONSUMER_KEY:
         return "⚠️ エラー: ODPT APIのアクセストークンが設定されていません。"
 
     params = {
@@ -133,9 +115,8 @@ def build_timetable_message() -> str:
     if not raw_data:
         return "⚠️ 時刻表データが見つかりませんでした。"
 
-    # 日本時間（JST）で現在時刻を取得
     now_jst = datetime.now(JST)
-    now_str = now_jst.strftime("%H:%M")
+    now_str = target_time_str if target_time_str else now_jst.strftime("%H:%M")
     is_weekend = now_jst.weekday() >= 5
 
     target_calendar = "odpt.Calendar:SaturdayHoliday" if is_weekend else "odpt.Calendar:Weekday"
@@ -158,10 +139,12 @@ def build_timetable_message() -> str:
             dest_list = train.get("odpt:destinationStation", [])
             dest_raw = dest_list[0].split(".")[-1] if dest_list else ""
 
-            # --- 当駅始発の判定 ---
+            # 当駅始発判定（埼玉高速鉄道始発以外を赤羽岩淵始発と判定）
             origin_list = train.get("odpt:originStation", [])
-            # 始発駅データに「AkabaneIwabuchi」が含まれているか判定
-            is_origin = any("AkabaneIwabuchi" in orig for orig in origin_list)
+            origin_str = "".join(origin_list)
+            
+            is_sr_train = "SaitamaRailway" in origin_str or "UrawaMisono" in origin_str
+            is_origin = ("AkabaneIwabuchi" in origin_str) or (len(origin_list) > 0 and not is_sr_train)
 
             eval_res = analyze_car_length(train_num, dest_raw, is_origin)
             eval_res["departure_time"] = dep_time
@@ -171,15 +154,14 @@ def build_timetable_message() -> str:
     selected_trains = upcoming_trains[:5]
 
     if not selected_trains:
-        return f"🚃 赤羽岩淵発（目黒方面）\n現在時刻 ({now_str}) 以降の本日の発車予定はありません（終電終了）。"
+        return f"🚃 赤羽岩淵発（目黒方面）\n時刻 ({now_str}) 以降の発車予定はありません。"
 
     lines = [
         "🚃 赤羽岩淵発（目黒方面）両数案内",
-        f"⏰ 現在時刻: {now_str} (日本時間)\n"
+        f"⏰ 検索基準時刻: {now_str}\n"
     ]
 
     for t in selected_trains:
-        # 始発列車には 🪑 マークを表示
         origin_tag = " 🪑[当駅始発]" if t["is_origin"] else ""
         lines.append(f"🕒 {t['departure_time']}発【{t['destination']} 行】{origin_tag}")
         lines.append(f" ├ 編成: {t['cars']}")
@@ -189,9 +171,30 @@ def build_timetable_message() -> str:
 
     return "\n".join(lines)
 
-# ==============================================================================
-# 5. LINE Webhook サーバー処理
-# ==============================================================================
+def parse_time_input(user_text: str) -> str:
+    """ユーザーの入力文字から時刻（HH:MM）を解析"""
+    # 「11:00」「11:30」などの形式
+    m = re.search(r"(\d{1,2}):(\d{2})", user_text)
+    if m:
+        h, min_val = int(m.group(1)), int(m.group(2))
+        return f"{h:02d}:{min_val:02d}"
+    
+    # 「11時」「11時半」などの形式
+    m2 = re.search(r"(\d{1,2})\s*時\s*(\d{1,2})?", user_text)
+    if m2:
+        h = int(m2.group(1))
+        min_val = int(m2.group(2)) if m2.group(2) else 0
+        return f"{h:02d}:{min_val:02d}"
+        
+    # 「11」などの数字のみ
+    m3 = re.search(r"^(\d{1,2})$", user_text.strip())
+    if m3:
+        h = int(m3.group(1))
+        if 0 <= h <= 23:
+            return f"{h:02d}:00"
+
+    return None
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature', '')
@@ -206,7 +209,11 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    reply_text = build_timetable_message()
+    user_text = event.message.text
+    target_time = parse_time_input(user_text)
+
+    # 時間指定があればその時間で、なければ現在時刻で検索
+    reply_text = build_timetable_message(target_time_str=target_time)
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
@@ -217,9 +224,6 @@ def handle_message(event):
             )
         )
 
-# ==============================================================================
-# 6. ローカルテスト実行
-# ==============================================================================
 if __name__ == "__main__":
-    print("=== 🧪 ローカルテスト実行（当駅始発対応版） ===")
-    print(build_timetable_message())
+    print("=== 🧪 11時00分指定のテスト実行 ===")
+    print(build_timetable_message(target_time_str="11:00"))
