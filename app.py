@@ -20,7 +20,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent, LocationMessag
 app = Flask(__name__)
 
 # ==============================================================================
-# 0. タイムゾーン設定（日本標準時 JST = UTC + 9時間）
+# 0. タイムゾーン設定（JST）
 # ==============================================================================
 JST = timezone(timedelta(hours=9))
 
@@ -39,24 +39,28 @@ RAILWAY_ID = "odpt.Railway:TokyoMetro.Namboku"
 RAIL_DIRECTION_ID = "odpt.RailDirection:TokyoMetro.Meguro"
 
 # ==============================================================================
-# 2. 駅座標（GPS）データリスト
+# 2. 東京メトロ南北線 全19駅 完全座標データ
 # ==============================================================================
 STATIONS_GEO = [
-    {"name": "赤羽岩淵", "id": "odpt.Station:TokyoMetro.Namboku.AkabaneIwabuchi", "lat": 35.7836, "lon": 139.7214},
-    {"name": "王子神谷", "id": "odpt.Station:TokyoMetro.Namboku.OjiKamiya", "lat": 35.7651, "lon": 139.7351},
-    {"name": "王子", "id": "odpt.Station:TokyoMetro.Namboku.Oji", "lat": 35.7525, "lon": 139.7380},
-    {"name": "西ヶ原", "id": "odpt.Station:TokyoMetro.Namboku.Nishigahara", "lat": 35.7456, "lon": 139.7420},
-    {"name": "駒込", "id": "odpt.Station:TokyoMetro.Namboku.Komagome", "lat": 35.7365, "lon": 139.7470},
-    {"name": "本駒込", "id": "odpt.Station:TokyoMetro.Namboku.HonKomagome", "lat": 35.7243, "lon": 139.7540},
-    {"name": "東大前", "id": "odpt.Station:TokyoMetro.Namboku.Todaimae", "lat": 35.7176, "lon": 139.7546},
-    {"name": "後楽園", "id": "odpt.Station:TokyoMetro.Namboku.Korakuen", "lat": 35.7078, "lon": 139.7518},
-    {"name": "飯田橋", "id": "odpt.Station:TokyoMetro.Namboku.Iidabashi", "lat": 35.7021, "lon": 139.7450},
-    {"name": "市ケ谷", "id": "odpt.Station:TokyoMetro.Namboku.Ichigaya", "lat": 35.6912, "lon": 139.7357},
-    {"name": "四ツ谷", "id": "odpt.Station:TokyoMetro.Namboku.Yotsuya", "lat": 35.6860, "lon": 139.7306},
-    {"name": "六本木一丁目", "id": "odpt.Station:TokyoMetro.Namboku.RoppongiItchome", "lat": 35.6656, "lon": 139.7390},
-    {"name": "麻布十番", "id": "odpt.Station:TokyoMetro.Namboku.AzabuJuban", "lat": 35.6546, "lon": 139.7371},
-    {"name": "白金高輪", "id": "odpt.Station:TokyoMetro.Namboku.ShirokaneTakanawa", "lat": 35.6429, "lon": 139.7340},
-    {"name": "目黒", "id": "odpt.Station:TokyoMetro.Namboku.Meguro", "lat": 35.6340, "lon": 139.7158},
+    {"name": "目黒", "id": "odpt.Station:TokyoMetro.Namboku.Meguro", "lat": 35.6340, "lon": 139.7158, "aliases": ["目黒", "めぐろ"]},
+    {"name": "白金台", "id": "odpt.Station:TokyoMetro.Namboku.Shirokanedai", "lat": 35.6379, "lon": 139.7258, "aliases": ["白金台", "しろかねだい"]},
+    {"name": "白金高輪", "id": "odpt.Station:TokyoMetro.Namboku.ShirokaneTakanawa", "lat": 35.6429, "lon": 139.7340, "aliases": ["白金高輪", "しろかねたかなわ"]},
+    {"name": "麻布十番", "id": "odpt.Station:TokyoMetro.Namboku.AzabuJuban", "lat": 35.6546, "lon": 139.7371, "aliases": ["麻布十番", "あざぶじゅうばん"]},
+    {"name": "六本木一丁目", "id": "odpt.Station:TokyoMetro.Namboku.RoppongiItchome", "lat": 35.6656, "lon": 139.7390, "aliases": ["六本木一丁目", "ろっぽんぎいっちょうめ"]},
+    {"name": "溜池山王", "id": "odpt.Station:TokyoMetro.Namboku.TameikeSanno", "lat": 35.6735, "lon": 139.7417, "aliases": ["溜池山王", "ためいけさんのう"]},
+    {"name": "永田町", "id": "odpt.Station:TokyoMetro.Namboku.Nagatacho", "lat": 35.6787, "lon": 139.7402, "aliases": ["永田町", "ながたちょう"]},
+    {"name": "四ツ谷", "id": "odpt.Station:TokyoMetro.Namboku.Yotsuya", "lat": 35.6860, "lon": 139.7306, "aliases": ["四ツ谷", "四谷", "よつや"]},
+    {"name": "市ケ谷", "id": "odpt.Station:TokyoMetro.Namboku.Ichigaya", "lat": 35.6912, "lon": 139.7357, "aliases": ["市ケ谷", "市ヶ谷", "いちがや"]},
+    {"name": "飯田橋", "id": "odpt.Station:TokyoMetro.Namboku.Iidabashi", "lat": 35.7021, "lon": 139.7450, "aliases": ["飯田橋", "いいだばし"]},
+    {"name": "後楽園", "id": "odpt.Station:TokyoMetro.Namboku.Korakuen", "lat": 35.7078, "lon": 139.7518, "aliases": ["後楽園", "こうらくえん"]},
+    {"name": "東大前", "id": "odpt.Station:TokyoMetro.Namboku.Todaimae", "lat": 35.7176, "lon": 139.7546, "aliases": ["東大前", "とうだいまえ"]},
+    {"name": "本駒込", "id": "odpt.Station:TokyoMetro.Namboku.HonKomagome", "lat": 35.7243, "lon": 139.7540, "aliases": ["本駒込", "ほんこまごめ"]},
+    {"name": "駒込", "id": "odpt.Station:TokyoMetro.Namboku.Komagome", "lat": 35.7365, "lon": 139.7470, "aliases": ["駒込", "こまごめ"]},
+    {"name": "西ヶ原", "id": "odpt.Station:TokyoMetro.Namboku.Nishigahara", "lat": 35.7456, "lon": 139.7420, "aliases": ["西ヶ原", "西ケ原", "にしがはら"]},
+    {"name": "王子", "id": "odpt.Station:TokyoMetro.Namboku.Oji", "lat": 35.7525, "lon": 139.7380, "aliases": ["王子", "おうじ"]},
+    {"name": "王子神谷", "id": "odpt.Station:TokyoMetro.Namboku.OjiKamiya", "lat": 35.7651, "lon": 139.7351, "aliases": ["王子神谷", "おうじかみや"]},
+    {"name": "志茂", "id": "odpt.Station:TokyoMetro.Namboku.Shimo", "lat": 35.7779, "lon": 139.7326, "aliases": ["志茂", "しも"]},
+    {"name": "赤羽岩淵", "id": "odpt.Station:TokyoMetro.Namboku.AkabaneIwabuchi", "lat": 35.7836, "lon": 139.7214, "aliases": ["赤羽岩淵", "赤羽", "あかばねいわぶち"]},
 ]
 
 STATION_NAME_MAP = {
@@ -74,10 +78,9 @@ STATION_NAME_MAP = {
 }
 
 # ==============================================================================
-# 3. 2点間の距離計算（Haversine）＆最寄り駅検索ロジック
+# 3. 距離計算（Haversine）＆検索判定ロジック
 # ==============================================================================
 def calculate_distance_km(lat1, lon1, lat2, lon2):
-    """2地点の緯度経度から距離（km）を算出"""
     R = 6371.0
     dlat = radians(lat2 - lat1)
     dlon = radians(lon2 - lon1)
@@ -86,7 +89,6 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
     return R * c
 
 def find_nearest_station(user_lat, user_lon):
-    """ユーザーの現在地に最も近い駅とその距離（m）を返す"""
     closest_station = None
     min_dist_km = float('inf')
 
@@ -98,6 +100,15 @@ def find_nearest_station(user_lat, user_lon):
 
     dist_meters = int(min_dist_km * 1000)
     return closest_station, dist_meters
+
+def find_station_by_text(user_text: str):
+    """入力テキストに駅名が含まれているか判定"""
+    cleaned_text = user_text.strip()
+    for st in STATIONS_GEO:
+        for alias in st["aliases"]:
+            if alias in cleaned_text:
+                return st
+    return None
 
 # ==============================================================================
 # 4. 両数・担当会社・当駅始発案内ロジック
@@ -151,15 +162,14 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
     }
 
 # ==============================================================================
-# 5. 時刻表メッセージ作成（対象駅を指定可能）
+# 5. 時刻表メッセージ作成
 # ==============================================================================
 def build_timetable_message(station_info: dict = None, target_time_str: str = None) -> str:
     if not ODPT_CONSUMER_KEY:
         return "⚠️ エラー: ODPT APIのアクセストークンが設定されていません。"
 
-    # 指定がなければデフォルトで「赤羽岩淵駅」
     if not station_info:
-        station_info = STATIONS_GEO[0]  # 赤羽岩淵
+        station_info = STATIONS_GEO[-1]  # デフォルト: 赤羽岩淵
 
     target_station_name = station_info["name"]
     target_station_id = station_info["id"]
@@ -195,7 +205,6 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     for train in trains_today:
         tt_objects = train.get("odpt:trainTimetableObject", [])
         
-        # 指定駅の発車時刻を探す
         dep_time = None
         for obj in tt_objects:
             dep_station = obj.get("odpt:departureStation", "")
@@ -242,7 +251,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
 
     return "\n".join(lines)
 
-def parse_input(user_text: str):
+def parse_time_input(user_text: str):
     m = re.search(r"(\d{1,2}):(\d{2})", user_text)
     if m:
         h, min_val = int(m.group(1)), int(m.group(2))
@@ -253,12 +262,6 @@ def parse_input(user_text: str):
         h = int(m2.group(1))
         min_val = int(m2.group(2)) if m2.group(2) else 0
         return f"{h:02d}:{min_val:02d}"
-        
-    m3 = re.search(r"^\s*(\d{1,2})\s*$", user_text.strip())
-    if m3:
-        h = int(m3.group(1))
-        if 0 <= h <= 23:
-            return f"{h:02d}:00"
 
     return None
 
@@ -277,14 +280,19 @@ def callback():
 
     return 'OK'
 
-# --- A. テキストメッセージ受信時 ---
+# --- A. テキストメッセージ受信時（時刻指定 or 駅名指定） ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_text = event.message.text
-    target_time = parse_input(user_text)
+    
+    # 1. 駅名が含まれているか判定
+    matched_station = find_station_by_text(user_text)
+    
+    # 2. 時刻が含まれているか判定
+    target_time = parse_time_input(user_text)
 
-    # デフォルトは赤羽岩淵駅で返信
-    reply_text = build_timetable_message(station_info=None, target_time_str=target_time)
+    # メッセージ生成
+    reply_text = build_timetable_message(station_info=matched_station, target_time_str=target_time)
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
@@ -304,7 +312,7 @@ def handle_location(event):
     # 最寄り駅と距離を検索
     nearest_station, dist_m = find_nearest_station(user_lat, user_lon)
 
-    header = f"📍 位置情報を受信しました！\n最寄り駅: **{nearest_station['name']}駅** (現在地から約 {dist_m}m)\n\n"
+    header = f"📍 位置情報を受信しました！\n最寄りの南北線駅: **{nearest_station['name']}駅** (約 {dist_m}m)\n\n"
     body_text = build_timetable_message(station_info=nearest_station)
     
     reply_text = header + body_text
@@ -318,12 +326,7 @@ def handle_location(event):
             )
         )
 
-# ==============================================================================
-# 7. ローカルテスト実行
-# ==============================================================================
 if __name__ == "__main__":
-    print("=== 🧪 位置情報連動テスト（王子駅周辺の座標でシミュレーション） ===")
-    test_lat, test_lon = 35.7530, 139.7385  # 王子駅付近
-    st, d = find_nearest_station(test_lat, test_lon)
-    print(f"最寄り駅検出: {st['name']}駅 ({d}m)")
+    print("=== 🧪 ローカルテスト（「王子 12:00」テキスト指定テスト） ===")
+    st = find_station_by_text("王子")
     print(build_timetable_message(station_info=st, target_time_str="12:00"))
