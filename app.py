@@ -34,12 +34,14 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "YOUR_LI
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-ODPT_API_URL = "https://api.odpt.org/api/v4/odpt:TrainTimetable"
+# API エンドポイント
+ODPT_STATION_TIMETABLE_URL = "https://api.odpt.org/api/v4/odpt:StationTimetable"
+ODPT_TRAIN_TIMETABLE_URL = "https://api.odpt.org/api/v4/odpt:TrainTimetable"
 RAILWAY_ID = "odpt.Railway:TokyoMetro.Namboku"
 RAIL_DIRECTION_ID = "odpt.RailDirection:TokyoMetro.Meguro"
 
 # ==============================================================================
-# 2. 東京メトロ南北線 全19駅 完全座標データ
+# 2. 東京メトロ南北線 全19駅 座標＆別名マスター
 # ==============================================================================
 STATIONS_GEO = [
     {"name": "目黒", "id": "odpt.Station:TokyoMetro.Namboku.Meguro", "lat": 35.6340, "lon": 139.7158, "aliases": ["目黒", "めぐろ"]},
@@ -78,7 +80,7 @@ STATION_NAME_MAP = {
 }
 
 # ==============================================================================
-# 3. 距離計算（Haversine）＆検索判定ロジック
+# 3. 距離計算＆駅判定ロジック
 # ==============================================================================
 def calculate_distance_km(lat1, lon1, lat2, lon2):
     R = 6371.0
@@ -102,7 +104,6 @@ def find_nearest_station(user_lat, user_lon):
     return closest_station, dist_meters
 
 def find_station_by_text(user_text: str):
-    """入力テキストに駅名が含まれているか判定"""
     cleaned_text = user_text.strip()
     for st in STATIONS_GEO:
         for alias in st["aliases"]:
@@ -111,7 +112,7 @@ def find_station_by_text(user_text: str):
     return None
 
 # ==============================================================================
-# 4. 両数・担当会社・当駅始発案内ロジック
+# 4. 両数・編成判定ロジック
 # ==============================================================================
 def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool) -> dict:
     train_number = train_number.upper()
@@ -162,8 +163,31 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
     }
 
 # ==============================================================================
-# 5. 時刻表メッセージ作成
+# 5. ハイブリッド方式の時刻表取得ロジック
 # ==============================================================================
+def get_origin_train_numbers(target_station_id: str) -> set:
+    """列車時刻表 API から指定駅が始発となる列車番号のセットを取得"""
+    params = {
+        "acl:consumerKey": ODPT_CONSUMER_KEY,
+        "odpt:railway": RAILWAY_ID,
+        "odpt:railDirection": RAIL_DIRECTION_ID,
+    }
+    origin_set = set()
+    try:
+        res = requests.get(ODPT_TRAIN_TIMETABLE_URL, params=params, timeout=8)
+        if res.status_code == 200:
+            raw_trains = res.json()
+            station_short = target_station_id.split(".")[-1].lower()
+            for train in raw_trains:
+                orig_list = train.get("odpt:originStation", [])
+                if any(station_short in str(o).lower() for o in orig_list):
+                    t_num = train.get("odpt:trainNumber", "").upper()
+                    if t_num:
+                        origin_set.add(t_num)
+    except Exception:
+        pass
+    return origin_set
+
 def build_timetable_message(station_info: dict = None, target_time_str: str = None) -> str:
     if not ODPT_CONSUMER_KEY:
         return "⚠️ エラー: ODPT APIのアクセストークンが設定されていません。"
@@ -174,57 +198,54 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     target_station_name = station_info["name"]
     target_station_id = station_info["id"]
 
-    params = {
+    # 1. 始発電車番号リストを取得 (TrainTimetable)
+    origin_train_numbers = get_origin_train_numbers(target_station_id)
+
+    # 2. 正確な駅発車時刻表を取得 (StationTimetable)
+    params_st = {
         "acl:consumerKey": ODPT_CONSUMER_KEY,
-        "odpt:railway": RAILWAY_ID,
+        "odpt:station": target_station_id,
         "odpt:railDirection": RAIL_DIRECTION_ID,
     }
 
     try:
-        res = requests.get(ODPT_API_URL, params=params, timeout=10)
+        res = requests.get(ODPT_STATION_TIMETABLE_URL, params=params_st, timeout=10)
         res.raise_for_status()
-        raw_trains = res.json()
+        raw_data = res.json()
     except Exception as e:
         return f"❌ データ取得エラーが発生しました:\n{e}"
 
-    if not raw_trains:
+    if not raw_data:
         return "⚠️ 時刻表データが見つかりませんでした。"
 
     now_jst = datetime.now(JST)
     now_str = target_time_str if target_time_str else now_jst.strftime("%H:%M")
     is_weekend = now_jst.weekday() >= 5
-    target_calendar = "SaturdayHoliday" if is_weekend else "Weekday"
+    target_calendar = "odpt.Calendar:SaturdayHoliday" if is_weekend else "odpt.Calendar:Weekday"
 
-    trains_today = [
-        t for t in raw_trains
-        if target_calendar in t.get("odpt:calendar", "")
-    ]
+    matched_entry = next(
+        (item for item in raw_data if item.get("odpt:calendar") == target_calendar),
+        raw_data[0] if raw_data else None,
+    )
+
+    if not matched_entry:
+        return "⚠️ 本日の時刻表データが存在しません。"
+
+    timetable_objects = matched_entry.get("odpt:stationTimetableObject", [])
 
     upcoming_trains = []
-
-    for train in trains_today:
-        tt_objects = train.get("odpt:trainTimetableObject", [])
-        
-        dep_time = None
-        for obj in tt_objects:
-            dep_station = obj.get("odpt:departureStation", "")
-            if target_station_id in dep_station:
-                dep_time = obj.get("odpt:departureTime", "")
-                break
-
-        if dep_time and dep_time >= now_str:
-            train_num = train.get("odpt:trainNumber", "")
-            
+    for train in timetable_objects:
+        dep_time = train.get("odpt:departureTime", "")
+        if dep_time >= now_str:
+            train_num = train.get("odpt:trainNumber", "").upper()
             dest_list = train.get("odpt:destinationStation", [])
-            if dest_list:
-                dest_raw = dest_list[0].split(".")[-1]
-            else:
-                dest_raw = tt_objects[-1].get("odpt:arrivalStation", "").split(".")[-1] if tt_objects else ""
+            dest_raw = dest_list[0].split(".")[-1] if dest_list else ""
 
-            # 当駅始発判定
+            # 当駅始発判定（二重照合：StationTimetableの記載 or TrainTimetableの始発リスト一致）
             origin_list = train.get("odpt:originStation", [])
-            station_short_name = target_station_id.split(".")[-1].lower()
-            is_origin = any(station_short_name in str(o).lower() for o in origin_list)
+            station_short = target_station_id.split(".")[-1].lower()
+            is_origin_st = any(station_short in str(o).lower() for o in origin_list)
+            is_origin = is_origin_st or (train_num in origin_train_numbers)
 
             eval_res = analyze_car_length(train_num, dest_raw, is_origin)
             eval_res["departure_time"] = dep_time
@@ -280,18 +301,13 @@ def callback():
 
     return 'OK'
 
-# --- A. テキストメッセージ受信時（時刻指定 or 駅名指定） ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_text = event.message.text
     
-    # 1. 駅名が含まれているか判定
     matched_station = find_station_by_text(user_text)
-    
-    # 2. 時刻が含まれているか判定
     target_time = parse_time_input(user_text)
 
-    # メッセージ生成
     reply_text = build_timetable_message(station_info=matched_station, target_time_str=target_time)
 
     with ApiClient(configuration) as api_client:
@@ -303,13 +319,11 @@ def handle_message(event):
             )
         )
 
-# --- B. 位置情報（GPS）メッセージ受信時 ---
 @handler.add(MessageEvent, message=LocationMessageContent)
 def handle_location(event):
     user_lat = event.message.latitude
     user_lon = event.message.longitude
 
-    # 最寄り駅と距離を検索
     nearest_station, dist_m = find_nearest_station(user_lat, user_lon)
 
     header = f"📍 位置情報を受信しました！\n最寄りの南北線駅: **{nearest_station['name']}駅** (約 {dist_m}m)\n\n"
@@ -327,6 +341,5 @@ def handle_location(event):
         )
 
 if __name__ == "__main__":
-    print("=== 🧪 ローカルテスト（「王子 12:00」テキスト指定テスト） ===")
-    st = find_station_by_text("王子")
-    print(build_timetable_message(station_info=st, target_time_str="12:00"))
+    print("=== 🧪 ローカルテスト ===")
+    print(build_timetable_message(target_time_str="11:00"))
