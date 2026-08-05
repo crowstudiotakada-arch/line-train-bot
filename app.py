@@ -38,10 +38,9 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 ODPT_STATION_TIMETABLE_URL = "https://api.odpt.org/api/v4/odpt:StationTimetable"
 ODPT_TRAIN_TIMETABLE_URL = "https://api.odpt.org/api/v4/odpt:TrainTimetable"
 RAILWAY_ID = "odpt.Railway:TokyoMetro.Namboku"
-RAIL_DIRECTION_ID = "odpt.RailDirection:TokyoMetro.Meguro"
 
 # ==============================================================================
-# 2. 東京メトロ南北線 全19駅 座標＆別名マスター
+# 2. 東京メトロ南北線 全19駅 マスター
 # ==============================================================================
 STATIONS_GEO = [
     {"name": "目黒", "id": "odpt.Station:TokyoMetro.Namboku.Meguro", "lat": 35.6340, "lon": 139.7158, "aliases": ["目黒", "めぐろ"]},
@@ -66,21 +65,17 @@ STATIONS_GEO = [
 ]
 
 STATION_NAME_MAP = {
-    "Ebina": "海老名",
-    "Shonandai": "湘南台",
-    "Nishiya": "西谷",
-    "ShinYokohama": "新横浜",
-    "Hiyoshi": "日吉",
-    "MusashiKosugi": "武蔵小杉",
-    "Meguro": "目黒",
-    "ShirokaneTakanawa": "白金高輪",
-    "Shirokanedai": "白金台",
-    "Motonakayoshi": "元住吉",
-    "Kikuna": "菊名"
+    # 目黒方面
+    "Ebina": "海老名", "Shonandai": "湘南台", "Nishiya": "西谷", "ShinYokohama": "新横浜",
+    "Hiyoshi": "日吉", "MusashiKosugi": "武蔵小杉", "Meguro": "目黒", "ShirokaneTakanawa": "白金高輪",
+    "Shirokanedai": "白金台", "Motonakayoshi": "元住吉", "Kikuna": "菊名",
+    # 浦和美園方面
+    "AkabaneIwabuchi": "赤羽岩淵", "Hatogaya": "鳩ヶ谷", "UrawaMisono": "浦和美園",
+    "OjiKamiya": "王子神谷", "Komagome": "駒込"
 }
 
 # ==============================================================================
-# 3. 距離計算＆駅判定ロジック
+# 3. 解析＆検索補助ロジック
 # ==============================================================================
 def calculate_distance_km(lat1, lon1, lat2, lon2):
     R = 6371.0
@@ -93,15 +88,12 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
 def find_nearest_station(user_lat, user_lon):
     closest_station = None
     min_dist_km = float('inf')
-
     for st in STATIONS_GEO:
         dist = calculate_distance_km(user_lat, user_lon, st["lat"], st["lon"])
         if dist < min_dist_km:
             min_dist_km = dist
             closest_station = st
-
-    dist_meters = int(min_dist_km * 1000)
-    return closest_station, dist_meters
+    return closest_station, int(min_dist_km * 1000)
 
 def find_station_by_text(user_text: str):
     cleaned_text = user_text.strip()
@@ -109,6 +101,25 @@ def find_station_by_text(user_text: str):
         for alias in st["aliases"]:
             if alias in cleaned_text:
                 return st
+    return None
+
+def parse_direction(user_text: str) -> str:
+    """テキストから進行方向を判別 ('MEGURO' or 'URAWA')"""
+    urawa_keywords = ["浦和美園", "美園", "赤羽岩淵", "赤羽", "鳩ヶ谷", "下り", "北", "埼玉高速"]
+    for kw in urawa_keywords:
+        if kw in user_text:
+            return "URAWA"
+    return "MEGURO"
+
+def parse_time_input(user_text: str):
+    m = re.search(r"(\d{1,2}):(\d{2})", user_text)
+    if m:
+        return f"{int(m.group(1)):02d}:{int(m.group(2)):02d}"
+    m2 = re.search(r"(\d{1,2})\s*時\s*(\d{1,2})?", user_text)
+    if m2:
+        h = int(m2.group(1))
+        min_val = int(m2.group(2)) if m2.group(2) else 0
+        return f"{h:02d}:{min_val:02d}"
     return None
 
 # ==============================================================================
@@ -163,22 +174,20 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
     }
 
 # ==============================================================================
-# 5. ハイブリッド方式の時刻表取得ロジック
+# 5. 両方向対応 ハイブリッド時刻表取得ロジック
 # ==============================================================================
 def get_origin_train_numbers(target_station_id: str) -> set:
-    """列車時刻表 API から指定駅が始発となる列車番号のセットを取得"""
+    """始発列車番号リストの取得"""
     params = {
         "acl:consumerKey": ODPT_CONSUMER_KEY,
         "odpt:railway": RAILWAY_ID,
-        "odpt:railDirection": RAIL_DIRECTION_ID,
     }
     origin_set = set()
     try:
         res = requests.get(ODPT_TRAIN_TIMETABLE_URL, params=params, timeout=8)
         if res.status_code == 200:
-            raw_trains = res.json()
             station_short = target_station_id.split(".")[-1].lower()
-            for train in raw_trains:
+            for train in res.json():
                 orig_list = train.get("odpt:originStation", [])
                 if any(station_short in str(o).lower() for o in orig_list):
                     t_num = train.get("odpt:trainNumber", "").upper()
@@ -188,7 +197,7 @@ def get_origin_train_numbers(target_station_id: str) -> set:
         pass
     return origin_set
 
-def build_timetable_message(station_info: dict = None, target_time_str: str = None) -> str:
+def build_timetable_message(station_info: dict = None, target_time_str: str = None, direction_key: str = "MEGURO") -> str:
     if not ODPT_CONSUMER_KEY:
         return "⚠️ エラー: ODPT APIのアクセストークンが設定されていません。"
 
@@ -198,14 +207,15 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     target_station_name = station_info["name"]
     target_station_id = station_info["id"]
 
-    # 1. 始発電車番号リストを取得 (TrainTimetable)
+    direction_title = "目黒方面" if direction_key == "MEGURO" else "赤羽岩淵・浦和美園方面"
+
+    # 1. 始発電車番号リストを取得
     origin_train_numbers = get_origin_train_numbers(target_station_id)
 
-    # 2. 正確な駅発車時刻表を取得 (StationTimetable)
+    # 2. 駅発車時刻表を取得
     params_st = {
         "acl:consumerKey": ODPT_CONSUMER_KEY,
         "odpt:station": target_station_id,
-        "odpt:railDirection": RAIL_DIRECTION_ID,
     }
 
     try:
@@ -223,13 +233,20 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     is_weekend = now_jst.weekday() >= 5
     target_calendar = "odpt.Calendar:SaturdayHoliday" if is_weekend else "odpt.Calendar:Weekday"
 
-    matched_entry = next(
-        (item for item in raw_data if item.get("odpt:calendar") == target_calendar),
-        raw_data[0] if raw_data else None,
-    )
+    # 方向フィルタリング（目黒方面 or 浦和美園方面）
+    matched_entry = None
+    for item in raw_data:
+        if item.get("odpt:calendar") == target_calendar:
+            rail_dir = item.get("odpt:railDirection", "")
+            if direction_key == "MEGURO" and "Meguro" in rail_dir:
+                matched_entry = item
+                break
+            elif direction_key == "URAWA" and "Meguro" not in rail_dir:
+                matched_entry = item
+                break
 
     if not matched_entry:
-        return "⚠️ 本日の時刻表データが存在しません。"
+        return f"🚃 {target_station_name}駅発（{direction_title}）\n該当する方向の時刻表データが存在しません。"
 
     timetable_objects = matched_entry.get("odpt:stationTimetableObject", [])
 
@@ -241,7 +258,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
             dest_list = train.get("odpt:destinationStation", [])
             dest_raw = dest_list[0].split(".")[-1] if dest_list else ""
 
-            # 当駅始発判定（二重照合：StationTimetableの記載 or TrainTimetableの始発リスト一致）
+            # 当駅始発判定
             origin_list = train.get("odpt:originStation", [])
             station_short = target_station_id.split(".")[-1].lower()
             is_origin_st = any(station_short in str(o).lower() for o in origin_list)
@@ -255,10 +272,10 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     selected_trains = upcoming_trains[:5]
 
     if not selected_trains:
-        return f"🚃 {target_station_name}駅発（目黒方面）\n時刻 ({now_str}) 以降の発車予定はありません。"
+        return f"🚃 {target_station_name}駅発（{direction_title}）\n時刻 ({now_str}) 以降の発車予定はありません。"
 
     lines = [
-        f"🚃 {target_station_name}駅発（目黒方面）発車案内",
+        f"🚃 {target_station_name}駅発【{direction_title}】発車案内",
         f"⏰ 基準時刻: {now_str}\n"
     ]
 
@@ -270,21 +287,11 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
         lines.append(f" └ {t['recommendation']}")
         lines.append("-" * 20)
 
+    # 切り替えヒント文言の追加
+    alt_direction_hint = "「浦和美園」と入力すると反対方向も検索できます！" if direction_key == "MEGURO" else "「目黒」と入力すると目黒方面も検索できます！"
+    lines.append(f"💡 {alt_direction_hint}")
+
     return "\n".join(lines)
-
-def parse_time_input(user_text: str):
-    m = re.search(r"(\d{1,2}):(\d{2})", user_text)
-    if m:
-        h, min_val = int(m.group(1)), int(m.group(2))
-        return f"{h:02d}:{min_val:02d}"
-    
-    m2 = re.search(r"(\d{1,2})\s*時\s*(\d{1,2})?", user_text)
-    if m2:
-        h = int(m2.group(1))
-        min_val = int(m2.group(2)) if m2.group(2) else 0
-        return f"{h:02d}:{min_val:02d}"
-
-    return None
 
 # ==============================================================================
 # 6. LINE Webhook サーバー処理
@@ -307,8 +314,13 @@ def handle_message(event):
     
     matched_station = find_station_by_text(user_text)
     target_time = parse_time_input(user_text)
+    direction_key = parse_direction(user_text)
 
-    reply_text = build_timetable_message(station_info=matched_station, target_time_str=target_time)
+    reply_text = build_timetable_message(
+        station_info=matched_station,
+        target_time_str=target_time,
+        direction_key=direction_key
+    )
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
@@ -327,7 +339,7 @@ def handle_location(event):
     nearest_station, dist_m = find_nearest_station(user_lat, user_lon)
 
     header = f"📍 位置情報を受信しました！\n最寄りの南北線駅: **{nearest_station['name']}駅** (約 {dist_m}m)\n\n"
-    body_text = build_timetable_message(station_info=nearest_station)
+    body_text = build_timetable_message(station_info=nearest_station, direction_key="MEGURO")
     
     reply_text = header + body_text
 
@@ -341,5 +353,6 @@ def handle_location(event):
         )
 
 if __name__ == "__main__":
-    print("=== 🧪 ローカルテスト ===")
-    print(build_timetable_message(target_time_str="11:00"))
+    print("=== 🧪 ローカルテスト（「王子 浦和美園 12:00」指定） ===")
+    st = find_station_by_text("王子")
+    print(build_timetable_message(station_info=st, target_time_str="12:00", direction_key="URAWA"))
