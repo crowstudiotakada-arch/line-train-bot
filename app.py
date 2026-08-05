@@ -1,6 +1,5 @@
 import os
 import re
-import json
 from datetime import datetime, timezone, timedelta
 import requests
 from flask import Flask, request, abort
@@ -19,10 +18,14 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# タイムゾーン設定（JST）
+# ==============================================================================
+# 0. タイムゾーン設定（日本標準時 JST = UTC + 9時間）
+# ==============================================================================
 JST = timezone(timedelta(hours=9))
 
-# APIキー設定
+# ==============================================================================
+# 1. 各種APIキー設定（環境変数）
+# ==============================================================================
 ODPT_CONSUMER_KEY = os.environ.get("ODPT_CONSUMER_KEY", "uwvu4a98yybp82h2i7w1j2s9kozuxl7p6a4yyuempfpgtdbwbf2v6z2gsj551ff8")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "YOUR_LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "YOUR_LINE_CHANNEL_ACCESS_TOKEN")
@@ -30,8 +33,9 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "YOUR_LI
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-ODPT_API_URL = "https://api.odpt.org/api/v4/odpt:StationTimetable"
-STATION_ID = "odpt.Station:TokyoMetro.Namboku.AkabaneIwabuchi"
+# 列車時刻表 API（TrainTimetable）を使用
+ODPT_API_URL = "https://api.odpt.org/api/v4/odpt:TrainTimetable"
+RAILWAY_ID = "odpt.Railway:TokyoMetro.Namboku"
 RAIL_DIRECTION_ID = "odpt.RailDirection:TokyoMetro.Meguro"
 
 STATION_NAME_MAP = {
@@ -48,6 +52,9 @@ STATION_NAME_MAP = {
     "Kikuna": "菊名"
 }
 
+# ==============================================================================
+# 2. 両数・担当会社・当駅始発案内ロジック
+# ==============================================================================
 def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool) -> dict:
     train_number = train_number.upper()
     destination_display = STATION_NAME_MAP.get(destination_raw, destination_raw)
@@ -96,75 +103,78 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
         "recommendation": " / ".join(recommendations) if recommendations else "通常運行",
     }
 
-def build_timetable_message(target_time_str: str = None, debug_mode: bool = False) -> str:
+# ==============================================================================
+# 3. 列車時刻表 API から直近5本を抽出するメイン処理
+# ==============================================================================
+def build_timetable_message(target_time_str: str = None) -> str:
     if not ODPT_CONSUMER_KEY:
         return "⚠️ エラー: ODPT APIのアクセストークンが設定されていません。"
 
     params = {
         "acl:consumerKey": ODPT_CONSUMER_KEY,
-        "odpt:station": STATION_ID,
+        "odpt:railway": RAILWAY_ID,
         "odpt:railDirection": RAIL_DIRECTION_ID,
     }
 
     try:
         res = requests.get(ODPT_API_URL, params=params, timeout=10)
         res.raise_for_status()
-        raw_data = res.json()
+        raw_trains = res.json()
     except Exception as e:
         return f"❌ データ取得エラーが発生しました:\n{e}"
 
-    if not raw_data:
+    if not raw_trains:
         return "⚠️ 時刻表データが見つかりませんでした。"
 
     now_jst = datetime.now(JST)
     now_str = target_time_str if target_time_str else now_jst.strftime("%H:%M")
     is_weekend = now_jst.weekday() >= 5
+    target_calendar = "SaturdayHoliday" if is_weekend else "Weekday"
 
-    target_calendar = "odpt.Calendar:SaturdayHoliday" if is_weekend else "odpt.Calendar:Weekday"
-
-    matched_entry = next(
-        (item for item in raw_data if item.get("odpt:calendar") == target_calendar),
-        raw_data[0] if raw_data else None,
-    )
-
-    if not matched_entry:
-        return "⚠️ 本日の時刻表データが存在しません。"
-
-    timetable_objects = matched_entry.get("odpt:stationTimetableObject", [])
+    # カレンダー条件に合う列車をフィルタ
+    trains_today = [
+        t for t in raw_trains
+        if target_calendar in t.get("odpt:calendar", "")
+    ]
 
     upcoming_trains = []
-    for train in timetable_objects:
-        dep_time = train.get("odpt:departureTime", "")
-        if dep_time >= now_str:
-            train_num = train.get("odpt:trainNumber", "")
-            dest_list = train.get("odpt:destinationStation", [])
-            dest_raw = dest_list[0].split(".")[-1] if dest_list else ""
 
-            # 当駅始発判定（originStation または note を複合チェック）
-            origin_list = train.get("odpt:originStation", [])
-            note_text = train.get("odpt:note", "")
+    for train in trains_today:
+        tt_objects = train.get("odpt:trainTimetableObject", [])
+        
+        # 赤羽岩淵駅の発車時刻を探す
+        akabane_dep_time = None
+        for obj in tt_objects:
+            dep_station = obj.get("odpt:departureStation", "")
+            if "AkabaneIwabuchi" in dep_station:
+                akabane_dep_time = obj.get("odpt:departureTime", "")
+                break
+
+        # 赤羽岩淵の発車予定があり、指定時刻以降のもの
+        if akabane_dep_time and akabane_dep_time >= now_str:
+            train_num = train.get("odpt:trainNumber", "")
             
-            raw_check_str = f"{origin_list} {note_text}".lower()
-            is_origin = ("akabaneiwabuchi" in raw_check_str) or ("始発" in str(note_text))
+            # 行き先を取得
+            dest_list = train.get("odpt:destinationStation", [])
+            if dest_list:
+                dest_raw = dest_list[0].split(".")[-1]
+            else:
+                dest_raw = tt_objects[-1].get("odpt:arrivalStation", "").split(".")[-1] if tt_objects else ""
+
+            # 当駅始発の確定判定（列車全体の始発駅に AkabaneIwabuchi が含まれるか）
+            origin_list = train.get("odpt:originStation", [])
+            is_origin = any("akabaneiwabuchi" in str(o).lower() for o in origin_list)
 
             eval_res = analyze_car_length(train_num, dest_raw, is_origin)
-            eval_res["departure_time"] = dep_time
-            eval_res["raw_train"] = train  # デバッグ用
+            eval_res["departure_time"] = akabane_dep_time
             upcoming_trains.append(eval_res)
 
+    # 発車時刻順に並び替え
     upcoming_trains.sort(key=lambda x: x["departure_time"])
     selected_trains = upcoming_trains[:5]
 
     if not selected_trains:
         return f"🚃 赤羽岩淵発（目黒方面）\n時刻 ({now_str}) 以降の発車予定はありません。"
-
-    # デバッグモード時の処理：APIの生のデータをそのまま返信する
-    if debug_mode:
-        debug_lines = [f"🐛【11時台デバッグ出力（直近2本）】\n検索基準: {now_str}\n"]
-        for idx, t in enumerate(selected_trains[:2], 1):
-            debug_lines.append(f"--- 電車 #{idx} ({t['departure_time']}発) ---")
-            debug_lines.append(json.dumps(t["raw_train"], ensure_ascii=False, indent=2))
-        return "\n".join(debug_lines)
 
     lines = [
         "🚃 赤羽岩淵発（目黒方面）両数案内",
@@ -181,29 +191,32 @@ def build_timetable_message(target_time_str: str = None, debug_mode: bool = Fals
 
     return "\n".join(lines)
 
+# ==============================================================================
+# 4. 入力文字（時刻）のパース処理
+# ==============================================================================
 def parse_input(user_text: str):
-    """ユーザーの入力文字から時刻とデバッグフラグを抽出"""
-    debug_mode = "debug" in user_text.lower() or "デバッグ" in user_text
-    
     m = re.search(r"(\d{1,2}):(\d{2})", user_text)
     if m:
         h, min_val = int(m.group(1)), int(m.group(2))
-        return f"{h:02d}:{min_val:02d}", debug_mode
+        return f"{h:02d}:{min_val:02d}"
     
     m2 = re.search(r"(\d{1,2})\s*時\s*(\d{1,2})?", user_text)
     if m2:
         h = int(m2.group(1))
         min_val = int(m2.group(2)) if m2.group(2) else 0
-        return f"{h:02d}:{min_val:02d}", debug_mode
+        return f"{h:02d}:{min_val:02d}"
         
-    m3 = re.search(r"^(\d{1,2})$", user_text.strip())
+    m3 = re.search(r"^\s*(\d{1,2})\s*$", user_text.strip())
     if m3:
         h = int(m3.group(1))
         if 0 <= h <= 23:
-            return f"{h:02d}:00", debug_mode
+            return f"{h:02d}:00"
 
-    return None, debug_mode
+    return None
 
+# ==============================================================================
+# 5. LINE Webhook サーバー処理
+# ==============================================================================
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature', '')
@@ -218,10 +231,12 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    user_text = event.message.text
-    target_time, debug_mode = parse_input(user_text)
-
-    reply_text = build_timetable_message(target_time_str=target_time, debug_mode=debug_mode)
+    try:
+        user_text = event.message.text
+        target_time = parse_input(user_text)
+        reply_text = build_timetable_message(target_time_str=target_time)
+    except Exception as e:
+        reply_text = f"⚠️ エラーが発生しました:\n{e}"
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
@@ -232,6 +247,9 @@ def handle_message(event):
             )
         )
 
+# ==============================================================================
+# 6. ローカルテスト実行
+# ==============================================================================
 if __name__ == "__main__":
-    print("=== 🧪 11時00分指定のテスト実行 ===")
+    print("=== 🧪 11:00 のテスト実行 ===")
     print(build_timetable_message(target_time_str="11:00"))
