@@ -126,17 +126,17 @@ def parse_time_input(user_text: str):
     return None
 
 def create_quick_reply(station_name: str = None):
-    """ご指定の順番（1: 赤羽岩淵, 2: 溜池山王, 3: 目黒方面, 4: 浦和美園方面, 5: 現在地）で作成"""
+    """赤羽岩淵(上り)・溜池山王(下り)に更新したクイックリプライを作成"""
     prefix = f"{station_name} " if station_name else ""
     return QuickReply(
         items=[
-            # 1. 赤羽岩淵 (下り)
+            # 1. 赤羽岩淵 (上り: 目黒方面)
             QuickReplyItem(
-                action=MessageAction(label="🏠 赤羽岩淵(下り)", text="赤羽岩淵 浦和美園方面")
+                action=MessageAction(label="🏠 赤羽岩淵(上り)", text="赤羽岩淵 目黒方面")
             ),
-            # 2. 溜池山王 (上り)
+            # 2. 溜池山王 (下り: 浦和美園方面)
             QuickReplyItem(
-                action=MessageAction(label="🏢 溜池山王(上り)", text="溜池山王 目黒方面")
+                action=MessageAction(label="🏢 溜池山王(下り)", text="溜池山王 浦和美園方面")
             ),
             # 3. 目黒方面 (上り)［現在選択中の駅］
             QuickReplyItem(
