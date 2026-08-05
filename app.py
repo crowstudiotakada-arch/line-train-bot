@@ -1,5 +1,6 @@
 import os
 import re
+import json
 from datetime import datetime, timezone, timedelta
 import requests
 from flask import Flask, request, abort
@@ -95,7 +96,7 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
         "recommendation": " / ".join(recommendations) if recommendations else "通常運行",
     }
 
-def build_timetable_message(target_time_str: str = None) -> str:
+def build_timetable_message(target_time_str: str = None, debug_mode: bool = False) -> str:
     if not ODPT_CONSUMER_KEY:
         return "⚠️ エラー: ODPT APIのアクセストークンが設定されていません。"
 
@@ -139,13 +140,16 @@ def build_timetable_message(target_time_str: str = None) -> str:
             dest_list = train.get("odpt:destinationStation", [])
             dest_raw = dest_list[0].split(".")[-1] if dest_list else ""
 
-            # --- 修正版：確実な当駅始発判定 ---
+            # 当駅始発判定（originStation または note を複合チェック）
             origin_list = train.get("odpt:originStation", [])
-            # 始発駅データの中に "AkabaneIwabuchi" が含まれている場合のみ True とする
-            is_origin = any("akabaneiwabuchi" in str(orig).lower() for orig in origin_list)
+            note_text = train.get("odpt:note", "")
+            
+            raw_check_str = f"{origin_list} {note_text}".lower()
+            is_origin = ("akabaneiwabuchi" in raw_check_str) or ("始発" in str(note_text))
 
             eval_res = analyze_car_length(train_num, dest_raw, is_origin)
             eval_res["departure_time"] = dep_time
+            eval_res["raw_train"] = train  # デバッグ用
             upcoming_trains.append(eval_res)
 
     upcoming_trains.sort(key=lambda x: x["departure_time"])
@@ -153,6 +157,14 @@ def build_timetable_message(target_time_str: str = None) -> str:
 
     if not selected_trains:
         return f"🚃 赤羽岩淵発（目黒方面）\n時刻 ({now_str}) 以降の発車予定はありません。"
+
+    # デバッグモード時の処理：APIの生のデータをそのまま返信する
+    if debug_mode:
+        debug_lines = [f"🐛【11時台デバッグ出力（直近2本）】\n検索基準: {now_str}\n"]
+        for idx, t in enumerate(selected_trains[:2], 1):
+            debug_lines.append(f"--- 電車 #{idx} ({t['departure_time']}発) ---")
+            debug_lines.append(json.dumps(t["raw_train"], ensure_ascii=False, indent=2))
+        return "\n".join(debug_lines)
 
     lines = [
         "🚃 赤羽岩淵発（目黒方面）両数案内",
@@ -169,25 +181,28 @@ def build_timetable_message(target_time_str: str = None) -> str:
 
     return "\n".join(lines)
 
-def parse_time_input(user_text: str) -> str:
+def parse_input(user_text: str):
+    """ユーザーの入力文字から時刻とデバッグフラグを抽出"""
+    debug_mode = "debug" in user_text.lower() or "デバッグ" in user_text
+    
     m = re.search(r"(\d{1,2}):(\d{2})", user_text)
     if m:
         h, min_val = int(m.group(1)), int(m.group(2))
-        return f"{h:02d}:{min_val:02d}"
+        return f"{h:02d}:{min_val:02d}", debug_mode
     
     m2 = re.search(r"(\d{1,2})\s*時\s*(\d{1,2})?", user_text)
     if m2:
         h = int(m2.group(1))
         min_val = int(m2.group(2)) if m2.group(2) else 0
-        return f"{h:02d}:{min_val:02d}"
+        return f"{h:02d}:{min_val:02d}", debug_mode
         
     m3 = re.search(r"^(\d{1,2})$", user_text.strip())
     if m3:
         h = int(m3.group(1))
         if 0 <= h <= 23:
-            return f"{h:02d}:00"
+            return f"{h:02d}:00", debug_mode
 
-    return None
+    return None, debug_mode
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -204,9 +219,9 @@ def callback():
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_text = event.message.text
-    target_time = parse_time_input(user_text)
+    target_time, debug_mode = parse_input(user_text)
 
-    reply_text = build_timetable_message(target_time_str=target_time)
+    reply_text = build_timetable_message(target_time_str=target_time, debug_mode=debug_mode)
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
