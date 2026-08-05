@@ -126,16 +126,27 @@ def parse_time_input(user_text: str):
     return None
 
 def create_quick_reply(station_name: str = None):
-    """駅名を埋め込んだ動的クイックリプライを作成"""
+    """ご指定の順番（1: 赤羽岩淵, 2: 溜池山王, 3: 目黒方面, 4: 浦和美園方面, 5: 現在地）で作成"""
     prefix = f"{station_name} " if station_name else ""
     return QuickReply(
         items=[
+            # 1. 赤羽岩淵 (下り)
             QuickReplyItem(
-                action=MessageAction(label="🚃 目黒方面", text=f"{prefix}目黒方面")
+                action=MessageAction(label="🏠 赤羽岩淵(下り)", text="赤羽岩淵 浦和美園方面")
             ),
+            # 2. 溜池山王 (上り)
             QuickReplyItem(
-                action=MessageAction(label="🚃 浦和美園方面", text=f"{prefix}浦和美園方面")
+                action=MessageAction(label="🏢 溜池山王(上り)", text="溜池山王 目黒方面")
             ),
+            # 3. 目黒方面 (上り)［現在選択中の駅］
+            QuickReplyItem(
+                action=MessageAction(label="🚃 目黒方面(上り)", text=f"{prefix}目黒方面")
+            ),
+            # 4. 浦和美園方面 (下り)［現在選択中の駅］
+            QuickReplyItem(
+                action=MessageAction(label="🚃 浦和美園方面(下り)", text=f"{prefix}浦和美園方面")
+            ),
+            # 5. 現在地から検索
             QuickReplyItem(
                 action=LocationAction(label="📍 現在地から検索")
             ),
@@ -226,7 +237,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     target_station_name = station_info["name"]
     target_station_id = station_info["id"]
 
-    direction_title = "目黒方面" if direction_key == "MEGURO" else "赤羽岩淵・浦和美園方面"
+    direction_title = "目黒方面(上り)" if direction_key == "MEGURO" else "赤羽岩淵・浦和美園方面(下り)"
 
     # 1. 始発電車番号リストを取得
     origin_train_numbers = get_origin_train_numbers(target_station_id)
@@ -305,7 +316,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
         lines.append(f" └ {t['recommendation']}")
         lines.append("-" * 20)
 
-    lines.append("👇 下のボタンをタップして方向を切替できます")
+    lines.append("👇 下のボタンをタップしてワンタップ切替")
 
     return "\n".join(lines)
 
@@ -338,7 +349,6 @@ def handle_message(event):
         direction_key=direction_key
     )
 
-    # 検索対象となった駅名を特定（入力がなかった場合は赤羽岩淵）
     current_station_name = matched_station["name"] if matched_station else "赤羽岩淵"
 
     with ApiClient(configuration) as api_client:
