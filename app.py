@@ -13,7 +13,11 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage
+    TextMessage,
+    QuickReply,
+    QuickReplyItem,
+    MessageAction,
+    LocationAction
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, LocationMessageContent
 
@@ -104,7 +108,6 @@ def find_station_by_text(user_text: str):
     return None
 
 def parse_direction(user_text: str) -> str:
-    """テキストから進行方向を判別 ('MEGURO' or 'URAWA')"""
     urawa_keywords = ["浦和美園", "美園", "赤羽岩淵", "赤羽", "鳩ヶ谷", "下り", "北", "埼玉高速"]
     for kw in urawa_keywords:
         if kw in user_text:
@@ -121,6 +124,22 @@ def parse_time_input(user_text: str):
         min_val = int(m2.group(2)) if m2.group(2) else 0
         return f"{h:02d}:{min_val:02d}"
     return None
+
+def create_quick_reply():
+    """タップで選択できるクイックリプライボタンを作成"""
+    return QuickReply(
+        items=[
+            QuickReplyItem(
+                action=MessageAction(label="🚃 目黒方面", text="目黒方面")
+            ),
+            QuickReplyItem(
+                action=MessageAction(label="🚃 浦和美園方面", text="浦和美園方面")
+            ),
+            QuickReplyItem(
+                action=LocationAction(label="📍 現在地から検索")
+            ),
+        ]
+    )
 
 # ==============================================================================
 # 4. 両数・編成判定ロジック
@@ -174,10 +193,9 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
     }
 
 # ==============================================================================
-# 5. 両方向対応 ハイブリッド時刻表取得ロジック
+# 5. 時刻表取得ロジック
 # ==============================================================================
 def get_origin_train_numbers(target_station_id: str) -> set:
-    """始発列車番号リストの取得"""
     params = {
         "acl:consumerKey": ODPT_CONSUMER_KEY,
         "odpt:railway": RAILWAY_ID,
@@ -233,7 +251,6 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     is_weekend = now_jst.weekday() >= 5
     target_calendar = "odpt.Calendar:SaturdayHoliday" if is_weekend else "odpt.Calendar:Weekday"
 
-    # 方向フィルタリング（目黒方面 or 浦和美園方面）
     matched_entry = None
     for item in raw_data:
         if item.get("odpt:calendar") == target_calendar:
@@ -287,9 +304,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
         lines.append(f" └ {t['recommendation']}")
         lines.append("-" * 20)
 
-    # 切り替えヒント文言の追加
-    alt_direction_hint = "「浦和美園」と入力すると反対方向も検索できます！" if direction_key == "MEGURO" else "「目黒」と入力すると目黒方面も検索できます！"
-    lines.append(f"💡 {alt_direction_hint}")
+    lines.append("👇 下のボタンをタップして方向を切替できます")
 
     return "\n".join(lines)
 
@@ -327,7 +342,12 @@ def handle_message(event):
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)]
+                messages=[
+                    TextMessage(
+                        text=reply_text,
+                        quick_reply=create_quick_reply()  # クイックリプライ追加
+                    )
+                ]
             )
         )
 
@@ -348,11 +368,15 @@ def handle_location(event):
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)]
+                messages=[
+                    TextMessage(
+                        text=reply_text,
+                        quick_reply=create_quick_reply()  # クイックリプライ追加
+                    )
+                ]
             )
         )
 
 if __name__ == "__main__":
-    print("=== 🧪 ローカルテスト（「王子 浦和美園 12:00」指定） ===")
-    st = find_station_by_text("王子")
-    print(build_timetable_message(station_info=st, target_time_str="12:00", direction_key="URAWA"))
+    print("=== 🧪 ローカルテスト ===")
+    print(build_timetable_message(target_time_str="11:00"))
