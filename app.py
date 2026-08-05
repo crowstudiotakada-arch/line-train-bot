@@ -1,5 +1,6 @@
 import os
 import re
+from math import radians, cos, sin, asin, sqrt
 from datetime import datetime, timezone, timedelta
 import requests
 from flask import Flask, request, abort
@@ -14,7 +15,7 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, LocationMessageContent
 
 app = Flask(__name__)
 
@@ -33,10 +34,30 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "YOUR_LI
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 列車時刻表 API（TrainTimetable）を使用
 ODPT_API_URL = "https://api.odpt.org/api/v4/odpt:TrainTimetable"
 RAILWAY_ID = "odpt.Railway:TokyoMetro.Namboku"
 RAIL_DIRECTION_ID = "odpt.RailDirection:TokyoMetro.Meguro"
+
+# ==============================================================================
+# 2. 駅座標（GPS）データリスト
+# ==============================================================================
+STATIONS_GEO = [
+    {"name": "赤羽岩淵", "id": "odpt.Station:TokyoMetro.Namboku.AkabaneIwabuchi", "lat": 35.7836, "lon": 139.7214},
+    {"name": "王子神谷", "id": "odpt.Station:TokyoMetro.Namboku.OjiKamiya", "lat": 35.7651, "lon": 139.7351},
+    {"name": "王子", "id": "odpt.Station:TokyoMetro.Namboku.Oji", "lat": 35.7525, "lon": 139.7380},
+    {"name": "西ヶ原", "id": "odpt.Station:TokyoMetro.Namboku.Nishigahara", "lat": 35.7456, "lon": 139.7420},
+    {"name": "駒込", "id": "odpt.Station:TokyoMetro.Namboku.Komagome", "lat": 35.7365, "lon": 139.7470},
+    {"name": "本駒込", "id": "odpt.Station:TokyoMetro.Namboku.HonKomagome", "lat": 35.7243, "lon": 139.7540},
+    {"name": "東大前", "id": "odpt.Station:TokyoMetro.Namboku.Todaimae", "lat": 35.7176, "lon": 139.7546},
+    {"name": "後楽園", "id": "odpt.Station:TokyoMetro.Namboku.Korakuen", "lat": 35.7078, "lon": 139.7518},
+    {"name": "飯田橋", "id": "odpt.Station:TokyoMetro.Namboku.Iidabashi", "lat": 35.7021, "lon": 139.7450},
+    {"name": "市ケ谷", "id": "odpt.Station:TokyoMetro.Namboku.Ichigaya", "lat": 35.6912, "lon": 139.7357},
+    {"name": "四ツ谷", "id": "odpt.Station:TokyoMetro.Namboku.Yotsuya", "lat": 35.6860, "lon": 139.7306},
+    {"name": "六本木一丁目", "id": "odpt.Station:TokyoMetro.Namboku.RoppongiItchome", "lat": 35.6656, "lon": 139.7390},
+    {"name": "麻布十番", "id": "odpt.Station:TokyoMetro.Namboku.AzabuJuban", "lat": 35.6546, "lon": 139.7371},
+    {"name": "白金高輪", "id": "odpt.Station:TokyoMetro.Namboku.ShirokaneTakanawa", "lat": 35.6429, "lon": 139.7340},
+    {"name": "目黒", "id": "odpt.Station:TokyoMetro.Namboku.Meguro", "lat": 35.6340, "lon": 139.7158},
+]
 
 STATION_NAME_MAP = {
     "Ebina": "海老名",
@@ -53,7 +74,33 @@ STATION_NAME_MAP = {
 }
 
 # ==============================================================================
-# 2. 両数・担当会社・当駅始発案内ロジック
+# 3. 2点間の距離計算（Haversine）＆最寄り駅検索ロジック
+# ==============================================================================
+def calculate_distance_km(lat1, lon1, lat2, lon2):
+    """2地点の緯度経度から距離（km）を算出"""
+    R = 6371.0
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2)**2
+    c = 2 * asin(sqrt(a))
+    return R * c
+
+def find_nearest_station(user_lat, user_lon):
+    """ユーザーの現在地に最も近い駅とその距離（m）を返す"""
+    closest_station = None
+    min_dist_km = float('inf')
+
+    for st in STATIONS_GEO:
+        dist = calculate_distance_km(user_lat, user_lon, st["lat"], st["lon"])
+        if dist < min_dist_km:
+            min_dist_km = dist
+            closest_station = st
+
+    dist_meters = int(min_dist_km * 1000)
+    return closest_station, dist_meters
+
+# ==============================================================================
+# 4. 両数・担当会社・当駅始発案内ロジック
 # ==============================================================================
 def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool) -> dict:
     train_number = train_number.upper()
@@ -104,11 +151,18 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
     }
 
 # ==============================================================================
-# 3. 列車時刻表 API から直近5本を抽出するメイン処理
+# 5. 時刻表メッセージ作成（対象駅を指定可能）
 # ==============================================================================
-def build_timetable_message(target_time_str: str = None) -> str:
+def build_timetable_message(station_info: dict = None, target_time_str: str = None) -> str:
     if not ODPT_CONSUMER_KEY:
         return "⚠️ エラー: ODPT APIのアクセストークンが設定されていません。"
+
+    # 指定がなければデフォルトで「赤羽岩淵駅」
+    if not station_info:
+        station_info = STATIONS_GEO[0]  # 赤羽岩淵
+
+    target_station_name = station_info["name"]
+    target_station_id = station_info["id"]
 
     params = {
         "acl:consumerKey": ODPT_CONSUMER_KEY,
@@ -131,7 +185,6 @@ def build_timetable_message(target_time_str: str = None) -> str:
     is_weekend = now_jst.weekday() >= 5
     target_calendar = "SaturdayHoliday" if is_weekend else "Weekday"
 
-    # カレンダー条件に合う列車をフィルタ
     trains_today = [
         t for t in raw_trains
         if target_calendar in t.get("odpt:calendar", "")
@@ -142,43 +195,41 @@ def build_timetable_message(target_time_str: str = None) -> str:
     for train in trains_today:
         tt_objects = train.get("odpt:trainTimetableObject", [])
         
-        # 赤羽岩淵駅の発車時刻を探す
-        akabane_dep_time = None
+        # 指定駅の発車時刻を探す
+        dep_time = None
         for obj in tt_objects:
             dep_station = obj.get("odpt:departureStation", "")
-            if "AkabaneIwabuchi" in dep_station:
-                akabane_dep_time = obj.get("odpt:departureTime", "")
+            if target_station_id in dep_station:
+                dep_time = obj.get("odpt:departureTime", "")
                 break
 
-        # 赤羽岩淵の発車予定があり、指定時刻以降のもの
-        if akabane_dep_time and akabane_dep_time >= now_str:
+        if dep_time and dep_time >= now_str:
             train_num = train.get("odpt:trainNumber", "")
             
-            # 行き先を取得
             dest_list = train.get("odpt:destinationStation", [])
             if dest_list:
                 dest_raw = dest_list[0].split(".")[-1]
             else:
                 dest_raw = tt_objects[-1].get("odpt:arrivalStation", "").split(".")[-1] if tt_objects else ""
 
-            # 当駅始発の確定判定（列車全体の始発駅に AkabaneIwabuchi が含まれるか）
+            # 当駅始発判定
             origin_list = train.get("odpt:originStation", [])
-            is_origin = any("akabaneiwabuchi" in str(o).lower() for o in origin_list)
+            station_short_name = target_station_id.split(".")[-1].lower()
+            is_origin = any(station_short_name in str(o).lower() for o in origin_list)
 
             eval_res = analyze_car_length(train_num, dest_raw, is_origin)
-            eval_res["departure_time"] = akabane_dep_time
+            eval_res["departure_time"] = dep_time
             upcoming_trains.append(eval_res)
 
-    # 発車時刻順に並び替え
     upcoming_trains.sort(key=lambda x: x["departure_time"])
     selected_trains = upcoming_trains[:5]
 
     if not selected_trains:
-        return f"🚃 赤羽岩淵発（目黒方面）\n時刻 ({now_str}) 以降の発車予定はありません。"
+        return f"🚃 {target_station_name}駅発（目黒方面）\n時刻 ({now_str}) 以降の発車予定はありません。"
 
     lines = [
-        "🚃 赤羽岩淵発（目黒方面）両数案内",
-        f"⏰ 検索基準時刻: {now_str}\n"
+        f"🚃 {target_station_name}駅発（目黒方面）発車案内",
+        f"⏰ 基準時刻: {now_str}\n"
     ]
 
     for t in selected_trains:
@@ -191,9 +242,6 @@ def build_timetable_message(target_time_str: str = None) -> str:
 
     return "\n".join(lines)
 
-# ==============================================================================
-# 4. 入力文字（時刻）のパース処理
-# ==============================================================================
 def parse_input(user_text: str):
     m = re.search(r"(\d{1,2}):(\d{2})", user_text)
     if m:
@@ -215,7 +263,7 @@ def parse_input(user_text: str):
     return None
 
 # ==============================================================================
-# 5. LINE Webhook サーバー処理
+# 6. LINE Webhook サーバー処理
 # ==============================================================================
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -229,14 +277,37 @@ def callback():
 
     return 'OK'
 
+# --- A. テキストメッセージ受信時 ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    try:
-        user_text = event.message.text
-        target_time = parse_input(user_text)
-        reply_text = build_timetable_message(target_time_str=target_time)
-    except Exception as e:
-        reply_text = f"⚠️ エラーが発生しました:\n{e}"
+    user_text = event.message.text
+    target_time = parse_input(user_text)
+
+    # デフォルトは赤羽岩淵駅で返信
+    reply_text = build_timetable_message(station_info=None, target_time_str=target_time)
+
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=reply_text)]
+            )
+        )
+
+# --- B. 位置情報（GPS）メッセージ受信時 ---
+@handler.add(MessageEvent, message=LocationMessageContent)
+def handle_location(event):
+    user_lat = event.message.latitude
+    user_lon = event.message.longitude
+
+    # 最寄り駅と距離を検索
+    nearest_station, dist_m = find_nearest_station(user_lat, user_lon)
+
+    header = f"📍 位置情報を受信しました！\n最寄り駅: **{nearest_station['name']}駅** (現在地から約 {dist_m}m)\n\n"
+    body_text = build_timetable_message(station_info=nearest_station)
+    
+    reply_text = header + body_text
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
@@ -248,8 +319,11 @@ def handle_message(event):
         )
 
 # ==============================================================================
-# 6. ローカルテスト実行
+# 7. ローカルテスト実行
 # ==============================================================================
 if __name__ == "__main__":
-    print("=== 🧪 11:00 のテスト実行 ===")
-    print(build_timetable_message(target_time_str="11:00"))
+    print("=== 🧪 位置情報連動テスト（王子駅周辺の座標でシミュレーション） ===")
+    test_lat, test_lon = 35.7530, 139.7385  # 王子駅付近
+    st, d = find_nearest_station(test_lat, test_lon)
+    print(f"最寄り駅検出: {st['name']}駅 ({d}m)")
+    print(build_timetable_message(station_info=st, target_time_str="12:00"))
