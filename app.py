@@ -139,12 +139,15 @@ def build_timetable_message(target_time_str: str = None) -> str:
             dest_list = train.get("odpt:destinationStation", [])
             dest_raw = dest_list[0].split(".")[-1] if dest_list else ""
 
-            # 当駅始発判定（埼玉高速鉄道始発以外を赤羽岩淵始発と判定）
+            # --- 修正版：当駅始発判定ロジック ---
             origin_list = train.get("odpt:originStation", [])
             origin_str = "".join(origin_list)
             
-            is_sr_train = "SaitamaRailway" in origin_str or "UrawaMisono" in origin_str
-            is_origin = ("AkabaneIwabuchi" in origin_str) or (len(origin_list) > 0 and not is_sr_train)
+            # 埼玉高速鉄道からの直通電車でなければ「赤羽岩淵始発（当駅始発）」と判定
+            is_saitama_through_train = any(
+                kw in origin_str for kw in ["SaitamaRailway", "UrawaMisono", "Hatogaya"]
+            )
+            is_origin = not is_saitama_through_train
 
             eval_res = analyze_car_length(train_num, dest_raw, is_origin)
             eval_res["departure_time"] = dep_time
@@ -172,21 +175,17 @@ def build_timetable_message(target_time_str: str = None) -> str:
     return "\n".join(lines)
 
 def parse_time_input(user_text: str) -> str:
-    """ユーザーの入力文字から時刻（HH:MM）を解析"""
-    # 「11:00」「11:30」などの形式
     m = re.search(r"(\d{1,2}):(\d{2})", user_text)
     if m:
         h, min_val = int(m.group(1)), int(m.group(2))
         return f"{h:02d}:{min_val:02d}"
     
-    # 「11時」「11時半」などの形式
     m2 = re.search(r"(\d{1,2})\s*時\s*(\d{1,2})?", user_text)
     if m2:
         h = int(m2.group(1))
         min_val = int(m2.group(2)) if m2.group(2) else 0
         return f"{h:02d}:{min_val:02d}"
         
-    # 「11」などの数字のみ
     m3 = re.search(r"^(\d{1,2})$", user_text.strip())
     if m3:
         h = int(m3.group(1))
@@ -212,7 +211,6 @@ def handle_message(event):
     user_text = event.message.text
     target_time = parse_time_input(user_text)
 
-    # 時間指定があればその時間で、なければ現在時刻で検索
     reply_text = build_timetable_message(target_time_str=target_time)
 
     with ApiClient(configuration) as api_client:
