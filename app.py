@@ -139,15 +139,10 @@ def build_timetable_message(target_time_str: str = None) -> str:
             dest_list = train.get("odpt:destinationStation", [])
             dest_raw = dest_list[0].split(".")[-1] if dest_list else ""
 
-            # --- 修正版：当駅始発判定ロジック ---
+            # --- 修正版：確実な当駅始発判定 ---
             origin_list = train.get("odpt:originStation", [])
-            origin_str = "".join(origin_list)
-            
-            # 埼玉高速鉄道からの直通電車でなければ「赤羽岩淵始発（当駅始発）」と判定
-            is_saitama_through_train = any(
-                kw in origin_str for kw in ["SaitamaRailway", "UrawaMisono", "Hatogaya"]
-            )
-            is_origin = not is_saitama_through_train
+            # 始発駅データの中に "AkabaneIwabuchi" が含まれている場合のみ True とする
+            is_origin = any("akabaneiwabuchi" in str(orig).lower() for orig in origin_list)
 
             eval_res = analyze_car_length(train_num, dest_raw, is_origin)
             eval_res["departure_time"] = dep_time
