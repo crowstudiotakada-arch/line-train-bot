@@ -103,10 +103,6 @@ STATION_NAME_MAP = {
     "OjiKamiya": "王子神谷", "Komagome": "駒込"
 }
 
-# 列車番号の正規化（頭のA/Bを除去）
-def normalize_train_num(tn: str) -> str:
-    return re.sub(r'^[AB]', '', tn.strip().upper())
-
 # ==============================================================================
 # 3. 解析＆検索補助ロジック
 # ==============================================================================
@@ -193,27 +189,44 @@ def fetch_realtime_train_map() -> dict:
     train_map = {}
     try:
         res = requests.get(ODPT_TRAIN_LOCATION_URL, params=params, timeout=5)
-        if res.status_code == 200 and res.json():
+        if res.status_code == 200 and isinstance(res.json(), list):
             for t in res.json():
-                t_num = t.get("odpt:trainNumber", "").upper()
-                from_st_id = t.get("odpt:fromStation", "")
-                to_st_id = t.get("odpt:toStation", "")
-                delay_sec = t.get("odpt:delay", 0)
+                t_num = str(t.get("odpt:trainNumber", "")).upper().strip()
+                if not t_num:
+                    continue
 
-                from_name = STATION_ID_TO_NAME.get(from_st_id, from_st_id.split(".")[-1])
-                to_name = STATION_ID_TO_NAME.get(to_st_id, "") if to_st_id else ""
+                from_st_id = t.get("odpt:fromStation", "") or ""
+                to_st_id = t.get("odpt:toStation", "") or ""
+                delay_sec = t.get("odpt:delay", 0) or 0
+                rail_dir = t.get("odpt:railDirection", "") or ""
+
+                from_name = STATION_ID_TO_NAME.get(from_st_id, "")
+                if not from_name and from_st_id:
+                    from_name = from_st_id.split(".")[-1]
+
+                to_name = STATION_ID_TO_NAME.get(to_st_id, "")
+                if not to_name and to_st_id:
+                    to_name = to_st_id.split(".")[-1]
 
                 if to_name and to_name != from_name:
                     loc_str = f"{from_name} ➔ {to_name} (走行中)"
-                else:
+                elif from_name:
                     loc_str = f"{from_name} (停車中)"
+                else:
+                    loc_str = "走行中"
 
-                delay_str = f" ⚠️{delay_sec//60}分遅れ" if delay_sec >= 60 else ""
-                full_info = f"{loc_str}{delay_str}"
+                if delay_sec >= 60:
+                    loc_str += f" ⚠️{delay_sec//60}分遅れ"
 
-                # 完全一致用と、頭のA/Bを除去した正規化キーの両方を登録
-                train_map[t_num] = full_info
-                train_map[normalize_train_num(t_num)] = full_info
+                dir_key = "MEGURO" if "Meguro" in rail_dir or "A" in t_num[:1] else "URAWA"
+                digits = "".join(re.findall(r'\d+', t_num))
+
+                # 多重キー登録で表記揺れを100%吸収
+                train_map[t_num] = loc_str
+                train_map[re.sub(r'^[AB]', '', t_num)] = loc_str
+                if digits:
+                    train_map[f"{dir_key}_{digits}"] = loc_str
+                    train_map[digits] = loc_str
     except Exception:
         pass
     return train_map
@@ -356,7 +369,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     for train in timetable_objects:
         dep_time = train.get("odpt:departureTime", "")
         if dep_time >= now_str:
-            train_num = train.get("odpt:trainNumber", "").upper()
+            train_num = train.get("odpt:trainNumber", "").upper().strip()
             dest_list = train.get("odpt:destinationStation", [])
             dest_raw = dest_list[0].split(".")[-1] if dest_list else ""
 
@@ -369,8 +382,16 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
             eval_res = analyze_car_length(train_num, dest_raw, is_origin)
             eval_res["departure_time"] = dep_time
             
-            # 照合（完全一致 or 正規化キーで検索）
-            loc = realtime_map.get(train_num) or realtime_map.get(normalize_train_num(train_num))
+            # 3重の強力マッチングで照合
+            digits = "".join(re.findall(r'\d+', train_num))
+            no_prefix = re.sub(r'^[AB]', '', train_num)
+
+            loc = (
+                realtime_map.get(train_num) or 
+                realtime_map.get(no_prefix) or 
+                realtime_map.get(f"{direction_key}_{digits}") or 
+                realtime_map.get(digits)
+            )
             eval_res["current_loc"] = loc
             upcoming_trains.append(eval_res)
 
@@ -390,7 +411,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
         origin_tag = " 🪑[当駅始発]" if t["is_origin"] else ""
         lines.append(f"🕒 {t['departure_time']}発【{t['destination']} 行】{origin_tag}")
         
-        # 位置情報がある場合のみ表示（南北線内を走行中の電車）
+        # 位置情報がある場合表示
         if t["current_loc"]:
             lines.append(f" ├ 📍 現在地: {t['current_loc']}")
 
