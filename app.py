@@ -65,6 +65,7 @@ ODPT_TRAIN_TIMETABLE_URL = "https://api.odpt.org/api/v4/odpt:TrainTimetable"
 ODPT_TRAIN_INFO_URL = "https://api.odpt.org/api/v4/odpt:TrainInformation"
 ODPT_TRAIN_LOCATION_URL = "https://api.odpt.org/api/v4/odpt:Train"
 RAILWAY_ID = "odpt.Railway:TokyoMetro.Namboku"
+OPERATOR_ID = "odpt.Operator:TokyoMetro"
 
 # ==============================================================================
 # 2. 東京メトロ南北線 全19駅 マスター
@@ -107,7 +108,6 @@ STATION_NAME_MAP = {
 # 3. 時刻・日付計算（朝4時基準の24時間管理）
 # ==============================================================================
 def time_to_minutes(time_str: str) -> int:
-    """HH:MM を朝4時起算の通算分数に変換 (0:15 -> 24:15 -> 1455分)"""
     try:
         parts = time_str.split(":")
         h = int(parts[0])
@@ -119,7 +119,6 @@ def time_to_minutes(time_str: str) -> int:
         return 0
 
 def get_current_time_info(target_time_str: str = None):
-    """朝4時起算の基準分数・表示用文字列・日付判定（平日/土休日）を取得"""
     now_jst = datetime.now(JST)
 
     if target_time_str:
@@ -131,7 +130,6 @@ def get_current_time_info(target_time_str: str = None):
             h, m = now_jst.hour, now_jst.minute
             target_time_str = f"{h:02d}:{m:02d}"
 
-        # 手入力された時刻が深夜0〜3時台の場合は前日ダイヤとして判定
         if h < 4:
             effective_dt = now_jst if now_jst.hour < 4 else (now_jst - timedelta(days=1))
         else:
@@ -211,7 +209,7 @@ def parse_time_input(user_text: str):
     return None
 
 # ==============================================================================
-# 4. 運行障害・遅延情報 & リアルタイム列車位置 照合辞書取得
+# 4. 運行障害・遅延情報 & リアルタイム列車位置 照合辞書取得（メトロ一括取得➔Python抽出）
 # ==============================================================================
 def fetch_train_information() -> str:
     params = {
@@ -219,7 +217,7 @@ def fetch_train_information() -> str:
         "odpt:railway": RAILWAY_ID,
     }
     try:
-        res = requests.get(ODPT_TRAIN_INFO_URL, params=params, timeout=5)
+        res = requests.get(ODPT_TRAIN_INFO_URL, params=params, timeout=8)
         if res.status_code == 200 and res.json():
             info = res.json()[0]
             text_dict = info.get("odpt:trainInformationText", {})
@@ -230,19 +228,23 @@ def fetch_train_information() -> str:
     return "運行情報の取得に失敗しました。"
 
 def fetch_realtime_train_map() -> tuple[dict, bool]:
+    # 東京メトロ全体の列車位置データを取得し、Python側で南北線だけ抽出
     params = {
         "acl:consumerKey": ODPT_CONSUMER_KEY,
-        "odpt:railway": RAILWAY_ID,
+        "odpt:operator": OPERATOR_ID,
     }
     train_map = {}
     is_active = False
     try:
-        res = requests.get(ODPT_TRAIN_LOCATION_URL, params=params, timeout=5)
+        res = requests.get(ODPT_TRAIN_LOCATION_URL, params=params, timeout=10)
         if res.status_code == 200 and isinstance(res.json(), list):
-            raw_list = res.json()
-            if len(raw_list) > 0:
+            all_trains = res.json()
+            # 南北線の列車だけフィルタリング
+            namboku_trains = [t for t in all_trains if t.get("odpt:railway") == RAILWAY_ID]
+            
+            if len(namboku_trains) > 0:
                 is_active = True
-                for t in raw_list:
+                for t in namboku_trains:
                     t_num = str(t.get("odpt:trainNumber", "")).upper().strip()
                     if not t_num:
                         continue
@@ -331,7 +333,7 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
     }
 
 # ==============================================================================
-# 6. 時刻表取得＆ピンポイント位置紐付けロジック（深夜24時台対応）
+# 6. 時刻表取得＆ピンポイント位置紐付けロジック
 # ==============================================================================
 def get_origin_train_numbers(target_station_id: str) -> set:
     params = {
@@ -365,7 +367,6 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
 
     direction_title = "目黒方面(上り)" if direction_key == "MEGURO" else "赤羽岩淵・浦和美園方面(下り)"
 
-    # 朝4時起算の基準分数、表示用時刻、カレンダー（平日/土休日）を取得
     now_adj_minutes, now_display_str, target_calendar = get_current_time_info(target_time_str)
 
     # 1. 運行情報＆リアルタイム列車位置マップを取得
@@ -416,7 +417,6 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
         dep_time = train.get("odpt:departureTime", "")
         dep_minutes = time_to_minutes(dep_time)
 
-        # 朝4時起算の分数で比較（23:50 -> 1430分, 0:15 -> 1455分）
         if dep_minutes >= now_adj_minutes:
             train_num = train.get("odpt:trainNumber", "").upper().strip()
             dest_list = train.get("odpt:destinationStation", [])
@@ -443,7 +443,6 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
             eval_res["current_loc"] = loc
             upcoming_trains.append(eval_res)
 
-    # 分数順に正しくソート
     upcoming_trains.sort(key=lambda x: x["dep_minutes"])
     selected_trains = upcoming_trains[:5]
 
@@ -497,14 +496,15 @@ def handle_message(event):
     if "デバッグ" in user_text:
         params = {
             "acl:consumerKey": ODPT_CONSUMER_KEY,
-            "odpt:railway": RAILWAY_ID,
+            "odpt:operator": OPERATOR_ID,
         }
         try:
-            res = requests.get(ODPT_TRAIN_LOCATION_URL, params=params, timeout=5)
+            res = requests.get(ODPT_TRAIN_LOCATION_URL, params=params, timeout=10)
             if res.status_code == 200 and isinstance(res.json(), list):
-                raw_trains = res.json()
+                all_trains = res.json()
+                namboku_trains = [t for t in all_trains if t.get("odpt:railway") == RAILWAY_ID]
                 summary_lines = []
-                for t in raw_trains:
+                for t in namboku_trains:
                     t_num = t.get("odpt:trainNumber", "不明")
                     from_st = str(t.get("odpt:fromStation", "")).split(".")[-1]
                     to_st = str(t.get("odpt:toStation", "")).split(".")[-1]
@@ -513,8 +513,9 @@ def handle_message(event):
                 reply_text = (
                     f"🧪【ODPT リアルタイム位置 デバッグ】\n"
                     f"HTTPステータス: 200 OK\n"
-                    f"現在走行中の電車数: {len(raw_trains)}本\n\n"
-                    f"▼ 走行中電車一覧:\n" + ("\n".join(summary_lines[:10]) if summary_lines else "なし（深夜配信停止中など）")
+                    f"メトロ全線走行中: {len(all_trains)}本\n"
+                    f"南北線走行中: {len(namboku_trains)}本\n\n"
+                    f"▼ 南北線の走行中電車一覧:\n" + ("\n".join(summary_lines[:10]) if summary_lines else "なし（南北線内に走行電車が見つかりません）")
                 )
             else:
                 reply_text = f"🧪【デバッグ】API応答エラー: Status {res.status_code}\n{res.text[:200]}"
