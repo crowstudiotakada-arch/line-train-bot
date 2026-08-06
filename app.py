@@ -66,6 +66,7 @@ ODPT_TRAIN_INFO_URL = "https://api.odpt.org/api/v4/odpt:TrainInformation"
 ODPT_TRAIN_LOCATION_URL = "https://api.odpt.org/api/v4/odpt:Train"
 
 RAILWAY_ID = "odpt.Railway:TokyoMetro.Namboku"
+METRO_OPERATOR_ID = "odpt.Operator:TokyoMetro"
 
 # ==============================================================================
 # 2. 東京メトロ南北線 全19駅 マスター
@@ -81,7 +82,7 @@ STATIONS_GEO = [
     {"name": "四ツ谷", "id": "odpt.Station:TokyoMetro.Namboku.Yotsuya", "lat": 35.6860, "lon": 139.7306, "aliases": ["四ツ谷", "四谷", "よつや"]},
     {"name": "市ケ谷", "id": "odpt.Station:TokyoMetro.Namboku.Ichigaya", "lat": 35.6912, "lon": 139.7357, "aliases": ["市ケ谷", "市ヶ谷", "いちがや"]},
     {"name": "飯田橋", "id": "odpt.Station:TokyoMetro.Namboku.Iidabashi", "lat": 35.7021, "lon": 139.7450, "aliases": ["飯田橋", "いいだばし"]},
-    {"name": "後楽園", "id": "odpt.Station:TokyoMetro.Namboku. Korakuen", "lat": 35.7078, "lon": 139.7518, "aliases": ["後楽園", "こうらくえん"]},
+    {"name": "後楽園", "id": "odpt.Station:TokyoMetro.Namboku.Korakuen", "lat": 35.7078, "lon": 139.7518, "aliases": ["後楽園", "こうらくえん"]},
     {"name": "東大前", "id": "odpt.Station:TokyoMetro.Namboku.Todaimae", "lat": 35.7176, "lon": 139.7546, "aliases": ["東大前", "とうだいまえ"]},
     {"name": "本駒込", "id": "odpt.Station:TokyoMetro.Namboku.HonKomagome", "lat": 35.7243, "lon": 139.7540, "aliases": ["本駒込", "ほんこまごめ"]},
     {"name": "駒込", "id": "odpt.Station:TokyoMetro.Namboku.Komagome", "lat": 35.7365, "lon": 139.7470, "aliases": ["駒込", "こまごめ"]},
@@ -209,7 +210,7 @@ def parse_time_input(user_text: str):
     return None
 
 # ==============================================================================
-# 4. 運行障害・遅延情報 & リアルタイム列車位置 取得（一括取得➔Python抽出）
+# 4. 運行障害・遅延情報 & リアルタイム列車位置（東京メトロ限定取得）
 # ==============================================================================
 def fetch_train_information() -> str:
     params = {
@@ -228,9 +229,10 @@ def fetch_train_information() -> str:
     return "運行情報の取得に失敗しました。"
 
 def fetch_realtime_train_map() -> tuple[dict, bool]:
-    # URLクエリパラメータで絞り込まず全データを一括取得
+    # 東京メトロ限定でリクエストを出し、件数制限(200件)オーバーを防止
     params = {
-        "acl:consumerKey": ODPT_CONSUMER_KEY
+        "acl:consumerKey": ODPT_CONSUMER_KEY,
+        "odpt:operator": METRO_OPERATOR_ID
     }
     train_map = {}
     is_active = False
@@ -239,7 +241,6 @@ def fetch_realtime_train_map() -> tuple[dict, bool]:
         res = requests.get(ODPT_TRAIN_LOCATION_URL, params=params, timeout=10)
         if res.status_code == 200 and isinstance(res.json(), list):
             raw_list = res.json()
-            # Python側で南北線の電車だけを安全にフィルタリング
             namboku_trains = [
                 t for t in raw_list 
                 if "Namboku" in str(t.get("odpt:railway", ""))
@@ -461,7 +462,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
 
     for t in selected_trains:
         origin_tag = " 🪑[当駅始発]" if t["is_origin"] else ""
-        lines.append(f"🕒 {t['departure_time']}発【{t['destination']} 行】{origin_tag}")
+        lines.append(f"🕒 {t['departure_time']}发【{t['destination']} 行】{origin_tag}")
         
         if t["current_loc"]:
             lines.append(f" ├ 📍 現在地: {t['current_loc']}")
@@ -499,29 +500,32 @@ def handle_message(event):
     # 🧪 デバッグコマンド
     if "デバッグ" in user_text:
         try:
-            r = requests.get(ODPT_TRAIN_LOCATION_URL, params={"acl:consumerKey": ODPT_CONSUMER_KEY}, timeout=10)
-            if r.status_code == 200 and isinstance(r.json(), list):
-                raw_data = r.json()
-                namboku_list = [t for t in raw_data if "Namboku" in str(t.get("odpt:railway", ""))]
-                
-                sample_lines = []
-                for t in namboku_list[:5]:
-                    t_num = t.get("odpt:trainNumber", "")
-                    f_st = str(t.get("odpt:fromStation", "")).split(".")[-1]
-                    t_st = str(t.get("odpt:toStation", "")).split(".")[-1]
-                    sample_lines.append(f"・{t_num}: {f_st}➔{t_st}")
+            # 1. 東京メトロ限定取得
+            r_metro = requests.get(ODPT_TRAIN_LOCATION_URL, params={"acl:consumerKey": ODPT_CONSUMER_KEY, "odpt:operator": METRO_OPERATOR_ID}, timeout=10)
+            metro_data = r_metro.json() if r_metro.status_code == 200 and isinstance(r_metro.json(), list) else []
+            namboku_list = [t for t in metro_data if "Namboku" in str(t.get("odpt:railway", ""))]
 
-                reply_text = (
-                    f"🧪【ODPT リアルタイムデバッグ】\n"
-                    f"HTTPステータス: 200 OK\n"
-                    f"全列車取得件数: {len(raw_data)}件\n"
-                    f"南北線対象列車: {len(namboku_list)}件\n\n"
-                    f"▼ 南北線サンプル:\n" + ("\n".join(sample_lines) if sample_lines else "現在線路上に南北線の列車情報がありません")
-                )
-            else:
-                reply_text = f"🧪【デバッグ】API応答エラー: Status {r.status_code}"
+            # 2. パラメータなし全体取得
+            r_all = requests.get(ODPT_TRAIN_LOCATION_URL, params={"acl:consumerKey": ODPT_CONSUMER_KEY}, timeout=10)
+            all_data = r_all.json() if r_all.status_code == 200 and isinstance(r_all.json(), list) else []
+            operators = sorted(list(set(str(t.get("odpt:operator", "")).split(":")[-1] for t in all_data)))
+
+            sample_lines = []
+            for t in namboku_list[:5]:
+                t_num = t.get("odpt:trainNumber", "")
+                f_st = str(t.get("odpt:fromStation", "")).split(".")[-1]
+                t_st = str(t.get("odpt:toStation", "")).split(".")[-1]
+                sample_lines.append(f"・{t_num}: {f_st}➔{t_st}")
+
+            reply_text = (
+                f"🧪【ODPT リアルタイムデバッグ】\n"
+                f"① メトロ限定取得: {len(metro_data)}件 (うち南北線: {len(namboku_list)}件)\n"
+                f"② 全体取得件数: {len(all_data)}件\n"
+                f"③ 取れている事業者例: {', '.join(operators[:5])}\n\n"
+                f"▼ 南北線サンプル:\n" + ("\n".join(sample_lines) if sample_lines else "※南北線に該当データなし")
+            )
         except Exception as e:
-            reply_text = f"🧪【デバッグ】例外エラー: {e}"
+            reply_text = f"🧪【デバッグ】エラー: {e}"
         
         reply_message = TextMessage(text=reply_text)
 
