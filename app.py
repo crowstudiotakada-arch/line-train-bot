@@ -20,9 +20,10 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent, LocationMessag
 app = Flask(__name__)
 
 # ==============================================================================
-# 0. タイムゾーン設定（JST）
+# 0. タイムゾーン設定（JST）& ユーザー状態保持
 # ==============================================================================
 JST = timezone(timedelta(hours=9))
+user_last_station = {}  # { user_id: station_info }
 
 # ==============================================================================
 # 1. 各種APIキー設定（環境変数）
@@ -96,7 +97,11 @@ def find_nearest_station(user_lat, user_lon):
     return closest_station, int(min_dist_km * 1000)
 
 def find_station_by_text(user_text: str):
-    cleaned_text = user_text.strip()
+    # 方向指定キーワードを事前に除外して「純粋な駅名」を判定
+    cleaned_text = re.sub(r'(目黒方面|浦和美園方面|赤羽岩淵方面|上り|下り)', '', user_text).strip()
+    if not cleaned_text:
+        return None
+
     matches = []
     for st in STATIONS_GEO:
         for alias in st["aliases"]:
@@ -110,7 +115,7 @@ def find_station_by_text(user_text: str):
 def parse_direction(user_text: str) -> str:
     if any(kw in user_text for kw in ["目黒方面", "上り", "目黒行"]):
         return "MEGURO"
-    if any(kw in user_text for kw in ["浦和美園方面", "下り", "美園行", "赤羽岩淵方面"]):
+    if any(kw in user_text for kw in ["浦和美園方面", "下り", "美園行", "赤羽岩淵方面", "浦和美園"]):
         return "URAWA"
 
     urawa_keywords = ["浦和美園", "美園", "鳩ヶ谷", "埼玉高速"]
@@ -313,8 +318,19 @@ def callback():
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_text = event.message.text
+    user_id = getattr(event.source, 'user_id', None)
     
+    # 1. 入力メッセージから駅を検索
     matched_station = find_station_by_text(user_text)
+    
+    # 2. 駅名が含まれていれば状態保持、なければ前回の検索駅を使用
+    if matched_station:
+        if user_id:
+            user_last_station[user_id] = matched_station
+    else:
+        if user_id and user_id in user_last_station:
+            matched_station = user_last_station[user_id]
+
     target_time = parse_time_input(user_text)
     direction_key = parse_direction(user_text)
 
@@ -337,10 +353,15 @@ def handle_message(event):
 
 @handler.add(MessageEvent, message=LocationMessageContent)
 def handle_location(event):
+    user_id = getattr(event.source, 'user_id', None)
     user_lat = event.message.latitude
     user_lon = event.message.longitude
 
     nearest_station, dist_m = find_nearest_station(user_lat, user_lon)
+    
+    # 位置情報で特定された最寄り駅を記憶
+    if user_id:
+        user_last_station[user_id] = nearest_station
 
     header = f"📍 位置情報を受信しました！\n最寄りの南北線駅: **{nearest_station['name']}駅** (約 {dist_m}m)\n\n"
     body_text = build_timetable_message(station_info=nearest_station, direction_key="MEGURO")
