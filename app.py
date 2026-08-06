@@ -13,7 +13,10 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage
+    TextMessage,
+    QuickReply,
+    QuickReplyItem,
+    LocationAction
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, LocationMessageContent
 
@@ -25,7 +28,7 @@ app = Flask(__name__)
 JST = timezone(timedelta(hours=9))
 user_last_station = {}  # { user_id: station_info }
 
-# ガイドメッセージ（起動遅延に関する注意書きを追加）
+# ガイドメッセージ
 HELP_MESSAGE = (
     "📖【南北線案内Botの使い方】\n\n"
     "① 駅名で検索する\n"
@@ -36,7 +39,7 @@ HELP_MESSAGE = (
     "   ・🏢 溜池山王(下り)：溜池山王の浦和美園方面を表示\n"
     "   ・🚃 目黒方面/浦和美園方面：選択中の駅のまま方向を切り替え\n\n"
     "③ 位置情報から最寄り駅を検索\n"
-    "   「📍 現在地から検索」を押して位置情報を送信すると、一番近い南北線の駅を自動検索します。\n\n"
+    "   「📍 現在地から検索」を押すと表示されるボタンから位置情報を送信すると、一番近い南北線の駅を自動検索します。\n\n"
     "💡【表示マークの見方】\n"
     "🪑[当駅始発]：座れる可能性が高い始発電車です。\n"
     "編成/車両：6両・8両や運行会社（東急・相鉄・メトロ等）を表示します。\n\n"
@@ -117,7 +120,7 @@ def find_nearest_station(user_lat, user_lon):
     return closest_station, int(min_dist_km * 1000)
 
 def find_station_by_text(user_text: str):
-    cleaned_text = re.sub(r'(目黒方面|浦和美園方面|赤羽岩淵方面|上り|下り)', '', user_text).strip()
+    cleaned_text = re.sub(r'(目黒方面|浦和美園方面|赤羽岩淵方面|上り|下り|現在地)', '', user_text).strip()
     if not cleaned_text:
         return None
 
@@ -339,14 +342,25 @@ def handle_message(event):
     user_text = event.message.text.strip()
     user_id = getattr(event.source, 'user_id', None)
     
-    # 「使い方」「ヘルプ」判定
-    if any(kw in user_text for kw in ["使い方", "つかいかた", "ヘルプ", "help", "ガイド"]):
-        reply_text = HELP_MESSAGE
+    # 1. 「位置情報送信要求」判定（リッチメニューの現在地ボタンを押した時）
+    if "現在地" in user_text:
+        reply_message = TextMessage(
+            text="📍 下のボタンをタップして位置情報を送信してください。",
+            quick_reply=QuickReply(
+                items=[
+                    QuickReplyItem(
+                        action=LocationAction(label="📍 位置情報を送信")
+                    )
+                ]
+            )
+        )
+    # 2. 「使い方」「ヘルプ」判定
+    elif any(kw in user_text for kw in ["使い方", "つかいかた", "ヘルプ", "help", "ガイド"]):
+        reply_message = TextMessage(text=HELP_MESSAGE)
+    # 3. 通常の駅検索
     else:
-        # 1. 入力メッセージから駅を検索
         matched_station = find_station_by_text(user_text)
         
-        # 2. 駅名が含まれていれば状態保持、なければ前回の検索駅を使用
         if matched_station:
             if user_id:
                 user_last_station[user_id] = matched_station
@@ -362,15 +376,14 @@ def handle_message(event):
             target_time_str=target_time,
             direction_key=direction_key
         )
+        reply_message = TextMessage(text=reply_text)
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[
-                    TextMessage(text=reply_text)
-                ]
+                messages=[reply_message]
             )
         )
 
@@ -382,7 +395,6 @@ def handle_location(event):
 
     nearest_station, dist_m = find_nearest_station(user_lat, user_lon)
     
-    # 位置情報で特定された最寄り駅を記憶
     if user_id:
         user_last_station[user_id] = nearest_station
 
