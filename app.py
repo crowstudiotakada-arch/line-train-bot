@@ -1,7 +1,7 @@
 import os
 import re
 from math import radians, cos, sin, asin, sqrt
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 import requests
 from flask import Flask, request, abort
 
@@ -103,7 +103,76 @@ STATION_NAME_MAP = {
 }
 
 # ==============================================================================
-# 3. 時刻・日付計算（朝4時基準の24時間管理）
+# 3. 日本の祝日・振替休日 自動判定ロジック
+# ==============================================================================
+def get_japanese_holidays(year: int) -> set:
+    """指定された年の日本の全祝日・振替休日・国民の休日を計算"""
+    holidays = set()
+
+    # 1. 固定日付の祝日
+    fixed = [
+        (1, 1),   # 元日
+        (2, 11),  # 建国記念の日
+        (2, 23),  # 天皇誕生日
+        (4, 29),  # 昭和の日
+        (5, 3),   # 憲法記念日
+        (5, 4),   # みどりの日
+        (5, 5),   # こどもの日
+        (8, 11),  # 山の日
+        (11, 3),  # 文化の日
+        (11, 23), # 勤労感謝の日
+    ]
+    for m, d in fixed:
+        holidays.add(date(year, m, d))
+
+    # 春分の日・秋分の日（1980年〜2099年対応天文計算式）
+    vernal_day = int(20.8431 + 0.242194 * (year - 1980) - int((year - 1980) / 4))
+    autumnal_day = int(23.2488 + 0.242194 * (year - 1980) - int((year - 1980) / 4))
+    holidays.add(date(year, 3, vernal_day))
+    holidays.add(date(year, 9, autumnal_day))
+
+    # 2. ハッピーマンデー（第N月曜日）
+    def happy_monday(m, n):
+        d1 = date(year, m, 1)
+        first_m = 1 + (7 - d1.weekday()) % 7
+        return date(year, m, first_m + (n - 1) * 7)
+
+    holidays.add(happy_monday(1, 2))  # 成人の日 (1月第2月曜)
+    holidays.add(happy_monday(7, 3))  # 海の日 (7月第3月曜)
+    holidays.add(happy_monday(9, 3))  # 敬老の日 (9月第3月曜)
+    holidays.add(happy_monday(10, 2)) # スポーツの日 (10月第2月曜)
+
+    # 3. 振替休日（祝日が日曜日の場合、翌日以降の最初の平日）
+    substitutes = set()
+    for h in sorted(list(holidays)):
+        if h.weekday() == 6:  # 日曜日
+            sub = h + timedelta(days=1)
+            while sub in holidays or sub in substitutes:
+                sub += timedelta(days=1)
+            substitutes.add(sub)
+    holidays.update(substitutes)
+
+    # 4. 国民の休日（祝日と祝日に挟まれた平日）
+    citizens_holidays = set()
+    sorted_hols = sorted(list(holidays))
+    for i in range(len(sorted_hols) - 1):
+        h1 = sorted_hols[i]
+        h2 = sorted_hols[i+1]
+        if (h2 - h1).days == 2 and h1.weekday() != 6:
+            between = h1 + timedelta(days=1)
+            if between not in holidays:
+                citizens_holidays.add(between)
+    holidays.update(citizens_holidays)
+
+    return holidays
+
+def is_japanese_holiday(dt_date: date) -> bool:
+    """指定日付が祝日かどうか判定"""
+    holidays = get_japanese_holidays(dt_date.year)
+    return dt_date in holidays
+
+# ==============================================================================
+# 4. 時刻・日付計算（朝4時基準の24時間管理＆休日判定）
 # ==============================================================================
 def time_to_minutes(time_str: str) -> int:
     try:
@@ -145,8 +214,9 @@ def get_current_time_info(target_time_str: str = None):
             adj_minutes = h * 60 + m
         display_str = f"{h:02d}:{m:02d}"
 
-    is_weekend = effective_dt.weekday() >= 5
-    calendar_key = "odpt.Calendar:SaturdayHoliday" if is_weekend else "odpt.Calendar:Weekday"
+    # 土曜日・日曜日 または 日本の祝日の場合は「土休日ダイヤ」を適用
+    is_weekend_or_holiday = (effective_dt.weekday() >= 5) or is_japanese_holiday(effective_dt.date())
+    calendar_key = "odpt.Calendar:SaturdayHoliday" if is_weekend_or_holiday else "odpt.Calendar:Weekday"
 
     return adj_minutes, display_str, calendar_key
 
@@ -207,7 +277,7 @@ def parse_time_input(user_text: str):
     return None
 
 # ==============================================================================
-# 4. 運行障害・遅延情報 取得
+# 5. 運行障害・遅延情報 取得
 # ==============================================================================
 def fetch_train_information() -> str:
     params = {
@@ -226,7 +296,7 @@ def fetch_train_information() -> str:
     return "平常通り運行しています。"
 
 # ==============================================================================
-# 5. 両数・編成判定ロジック
+# 6. 両数・編成判定ロジック
 # ==============================================================================
 def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool) -> dict:
     train_number = train_number.upper()
@@ -277,7 +347,7 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
     }
 
 # ==============================================================================
-# 6. 時刻表取得ロジック
+# 7. 時刻表取得ロジック
 # ==============================================================================
 def get_origin_train_numbers(target_station_id: str) -> set:
     params = {
@@ -399,7 +469,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     return "\n".join(lines)
 
 # ==============================================================================
-# 7. LINE Webhook サーバー処理
+# 8. LINE Webhook サーバー処理
 # ==============================================================================
 @app.route("/callback", methods=['POST'])
 def callback():
