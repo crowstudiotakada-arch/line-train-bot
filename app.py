@@ -104,8 +104,56 @@ STATION_NAME_MAP = {
 }
 
 # ==============================================================================
-# 3. 解析＆検索補助ロジック
+# 3. 時刻・日付計算（朝4時基準の24時間管理）
 # ==============================================================================
+def time_to_minutes(time_str: str) -> int:
+    """HH:MM を朝4時起算の通算分数に変換 (0:15 -> 24:15 -> 1455分)"""
+    try:
+        parts = time_str.split(":")
+        h = int(parts[0])
+        m = int(parts[1])
+        if h < 4:
+            h += 24
+        return h * 60 + m
+    except Exception:
+        return 0
+
+def get_current_time_info(target_time_str: str = None):
+    """朝4時起算の基準分数・表示用文字列・日付判定（平日/土休日）を取得"""
+    now_jst = datetime.now(JST)
+
+    if target_time_str:
+        try:
+            parts = target_time_str.split(":")
+            h = int(parts[0])
+            m = int(parts[1])
+        except Exception:
+            h, m = now_jst.hour, now_jst.minute
+            target_time_str = f"{h:02d}:{m:02d}"
+
+        # 手入力された時刻が深夜0〜3時台の場合は前日ダイヤとして判定
+        if h < 4:
+            effective_dt = now_jst if now_jst.hour < 4 else (now_jst - timedelta(days=1))
+        else:
+            effective_dt = now_jst
+
+        adj_minutes = (h + 24 if h < 4 else h) * 60 + m
+        display_str = target_time_str
+    else:
+        h, m = now_jst.hour, now_jst.minute
+        if h < 4:
+            effective_dt = now_jst - timedelta(days=1)
+            adj_minutes = (h + 24) * 60 + m
+        else:
+            effective_dt = now_jst
+            adj_minutes = h * 60 + m
+        display_str = f"{h:02d}:{m:02d}"
+
+    is_weekend = effective_dt.weekday() >= 5
+    calendar_key = "odpt.Calendar:SaturdayHoliday" if is_weekend else "odpt.Calendar:Weekday"
+
+    return adj_minutes, display_str, calendar_key
+
 def calculate_distance_km(lat1, lon1, lat2, lon2):
     R = 6371.0
     dlat = radians(lat2 - lat1)
@@ -283,7 +331,7 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
     }
 
 # ==============================================================================
-# 6. 時刻表取得＆ピンポイント位置紐付けロジック
+# 6. 時刻表取得＆ピンポイント位置紐付けロジック（深夜24時台対応）
 # ==============================================================================
 def get_origin_train_numbers(target_station_id: str) -> set:
     params = {
@@ -317,6 +365,9 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
 
     direction_title = "目黒方面(上り)" if direction_key == "MEGURO" else "赤羽岩淵・浦和美園方面(下り)"
 
+    # 朝4時起算の基準分数、表示用時刻、カレンダー（平日/土休日）を取得
+    now_adj_minutes, now_display_str, target_calendar = get_current_time_info(target_time_str)
+
     # 1. 運行情報＆リアルタイム列車位置マップを取得
     train_info_text = fetch_train_information()
     realtime_map, is_realtime_active = fetch_realtime_train_map()
@@ -344,11 +395,6 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     if not raw_data:
         return "⚠️ 時刻表データが見つかりませんでした。"
 
-    now_jst = datetime.now(JST)
-    now_str = target_time_str if target_time_str else now_jst.strftime("%H:%M")
-    is_weekend = now_jst.weekday() >= 5
-    target_calendar = "odpt.Calendar:SaturdayHoliday" if is_weekend else "odpt.Calendar:Weekday"
-
     matched_entry = None
     for item in raw_data:
         if item.get("odpt:calendar") == target_calendar:
@@ -368,7 +414,10 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     upcoming_trains = []
     for train in timetable_objects:
         dep_time = train.get("odpt:departureTime", "")
-        if dep_time >= now_str:
+        dep_minutes = time_to_minutes(dep_time)
+
+        # 朝4時起算の分数で比較（23:50 -> 1430分, 0:15 -> 1455分）
+        if dep_minutes >= now_adj_minutes:
             train_num = train.get("odpt:trainNumber", "").upper().strip()
             dest_list = train.get("odpt:destinationStation", [])
             dest_raw = dest_list[0].split(".")[-1] if dest_list else ""
@@ -381,8 +430,8 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
 
             eval_res = analyze_car_length(train_num, dest_raw, is_origin)
             eval_res["departure_time"] = dep_time
-            
-            # マッチング
+            eval_res["dep_minutes"] = dep_minutes
+
             digits = "".join(re.findall(r'\d+', train_num))
             no_prefix = re.sub(r'^[AB]', '', train_num)
 
@@ -394,23 +443,23 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
             eval_res["current_loc"] = loc
             upcoming_trains.append(eval_res)
 
-    upcoming_trains.sort(key=lambda x: x["departure_time"])
+    # 分数順に正しくソート
+    upcoming_trains.sort(key=lambda x: x["dep_minutes"])
     selected_trains = upcoming_trains[:5]
 
     if not selected_trains:
-        return f"{info_header}🚃 {target_station_name}駅発（{direction_title}）\n時刻 ({now_str}) 以降の発車予定はありません。"
+        return f"{info_header}🚃 {target_station_name}駅発【{direction_title}】\n時刻 ({now_display_str}) 以降の本日の発車予定はありません（本日の運行は終了しました）。"
 
     lines = [info_header] if info_header else []
     lines.extend([
         f"🚃 {target_station_name}駅発【{direction_title}】発車案内",
-        f"⏰ 基準時刻: {now_str}\n"
+        f"⏰ 基準時刻: {now_display_str}\n"
     ])
 
     for t in selected_trains:
         origin_tag = " 🪑[当駅始発]" if t["is_origin"] else ""
         lines.append(f"🕒 {t['departure_time']}発【{t['destination']} 行】{origin_tag}")
         
-        # 位置情報がある場合表示
         if t["current_loc"]:
             lines.append(f" ├ 📍 現在地: {t['current_loc']}")
 
@@ -419,7 +468,6 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
         lines.append(f" └ {t['recommendation']}")
         lines.append("-" * 20)
 
-    # リアルタイム配信が停止している時間帯の場合の親切注記
     if not is_realtime_active:
         lines.append("※現在メトロAPIからリアルタイム位置が配信されていない時間帯のため、予定時刻表を表示しています。")
 
