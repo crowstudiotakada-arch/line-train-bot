@@ -181,53 +181,55 @@ def fetch_train_information() -> str:
         pass
     return "運行情報の取得に失敗しました。"
 
-def fetch_realtime_train_map() -> dict:
+def fetch_realtime_train_map() -> tuple[dict, bool]:
     params = {
         "acl:consumerKey": ODPT_CONSUMER_KEY,
         "odpt:railway": RAILWAY_ID,
     }
     train_map = {}
+    is_active = False
     try:
         res = requests.get(ODPT_TRAIN_LOCATION_URL, params=params, timeout=5)
         if res.status_code == 200 and isinstance(res.json(), list):
-            for t in res.json():
-                t_num = str(t.get("odpt:trainNumber", "")).upper().strip()
-                if not t_num:
-                    continue
+            raw_list = res.json()
+            if len(raw_list) > 0:
+                is_active = True
+                for t in raw_list:
+                    t_num = str(t.get("odpt:trainNumber", "")).upper().strip()
+                    if not t_num:
+                        continue
 
-                from_st_id = t.get("odpt:fromStation", "") or ""
-                to_st_id = t.get("odpt:toStation", "") or ""
-                delay_sec = t.get("odpt:delay", 0) or 0
+                    from_st_id = t.get("odpt:fromStation", "") or ""
+                    to_st_id = t.get("odpt:toStation", "") or ""
+                    delay_sec = t.get("odpt:delay", 0) or 0
 
-                from_name = STATION_ID_TO_NAME.get(from_st_id, "")
-                if not from_name and from_st_id:
-                    from_name = from_st_id.split(".")[-1]
+                    from_name = STATION_ID_TO_NAME.get(from_st_id, "")
+                    if not from_name and from_st_id:
+                        from_name = from_st_id.split(".")[-1]
 
-                to_name = STATION_ID_TO_NAME.get(to_st_id, "")
-                if not to_name and to_st_id:
-                    to_name = to_st_id.split(".")[-1]
+                    to_name = STATION_ID_TO_NAME.get(to_st_id, "")
+                    if not to_name and to_st_id:
+                        to_name = to_st_id.split(".")[-1]
 
-                if to_name and to_name != from_name:
-                    loc_str = f"{from_name} ➔ {to_name} (走行中)"
-                elif from_name:
-                    loc_str = f"{from_name} (停車中)"
-                else:
-                    loc_str = "走行中"
+                    if to_name and to_name != from_name:
+                        loc_str = f"{from_name} ➔ {to_name} (走行中)"
+                    elif from_name:
+                        loc_str = f"{from_name} (停車中)"
+                    else:
+                        loc_str = "走行中"
 
-                if delay_sec >= 60:
-                    loc_str += f" ⚠️{delay_sec//60}分遅れ"
+                    if delay_sec >= 60:
+                        loc_str += f" ⚠️{delay_sec//60}分遅れ"
 
-                # 数字部分の抽出 (例: "1201S" -> "1201", "A1201S" -> "1201")
-                digits = "".join(re.findall(r'\d+', t_num))
+                    digits = "".join(re.findall(r'\d+', t_num))
 
-                # 多重バリエーション登録
-                train_map[t_num] = loc_str
-                train_map[re.sub(r'^[AB]', '', t_num)] = loc_str
-                if digits:
-                    train_map[digits] = loc_str
+                    train_map[t_num] = loc_str
+                    train_map[re.sub(r'^[AB]', '', t_num)] = loc_str
+                    if digits:
+                        train_map[digits] = loc_str
     except Exception as e:
         print(f"[ERROR] fetch_realtime_train_map: {e}")
-    return train_map
+    return train_map, is_active
 
 # ==============================================================================
 # 5. 両数・編成判定ロジック
@@ -317,7 +319,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
 
     # 1. 運行情報＆リアルタイム列車位置マップを取得
     train_info_text = fetch_train_information()
-    realtime_map = fetch_realtime_train_map()
+    realtime_map, is_realtime_active = fetch_realtime_train_map()
 
     info_header = ""
     if "平常通り" not in train_info_text and "平常運転" not in train_info_text:
@@ -417,6 +419,10 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
         lines.append(f" └ {t['recommendation']}")
         lines.append("-" * 20)
 
+    # リアルタイム配信が停止している時間帯の場合の親切注記
+    if not is_realtime_active:
+        lines.append("※現在メトロAPIからリアルタイム位置が配信されていない時間帯のため、予定時刻表を表示しています。")
+
     return "\n".join(lines)
 
 # ==============================================================================
@@ -460,7 +466,7 @@ def handle_message(event):
                     f"🧪【ODPT リアルタイム位置 デバッグ】\n"
                     f"HTTPステータス: 200 OK\n"
                     f"現在走行中の電車数: {len(raw_trains)}本\n\n"
-                    f"▼ 走行中電車一覧:\n" + "\n".join(summary_lines[:10])
+                    f"▼ 走行中電車一覧:\n" + ("\n".join(summary_lines[:10]) if summary_lines else "なし（深夜配信停止中など）")
                 )
             else:
                 reply_text = f"🧪【デバッグ】API応答エラー: Status {res.status_code}\n{res.text[:200]}"
