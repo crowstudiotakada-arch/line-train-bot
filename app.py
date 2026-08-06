@@ -198,7 +198,6 @@ def fetch_realtime_train_map() -> dict:
                 from_st_id = t.get("odpt:fromStation", "") or ""
                 to_st_id = t.get("odpt:toStation", "") or ""
                 delay_sec = t.get("odpt:delay", 0) or 0
-                rail_dir = t.get("odpt:railDirection", "") or ""
 
                 from_name = STATION_ID_TO_NAME.get(from_st_id, "")
                 if not from_name and from_st_id:
@@ -218,17 +217,16 @@ def fetch_realtime_train_map() -> dict:
                 if delay_sec >= 60:
                     loc_str += f" ⚠️{delay_sec//60}分遅れ"
 
-                dir_key = "MEGURO" if "Meguro" in rail_dir or "A" in t_num[:1] else "URAWA"
+                # 数字部分の抽出 (例: "1201S" -> "1201", "A1201S" -> "1201")
                 digits = "".join(re.findall(r'\d+', t_num))
 
-                # 多重キー登録で表記揺れを100%吸収
+                # 多重バリエーション登録
                 train_map[t_num] = loc_str
                 train_map[re.sub(r'^[AB]', '', t_num)] = loc_str
                 if digits:
-                    train_map[f"{dir_key}_{digits}"] = loc_str
                     train_map[digits] = loc_str
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ERROR] fetch_realtime_train_map: {e}")
     return train_map
 
 # ==============================================================================
@@ -382,14 +380,13 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
             eval_res = analyze_car_length(train_num, dest_raw, is_origin)
             eval_res["departure_time"] = dep_time
             
-            # 3重の強力マッチングで照合
+            # マッチング
             digits = "".join(re.findall(r'\d+', train_num))
             no_prefix = re.sub(r'^[AB]', '', train_num)
 
             loc = (
                 realtime_map.get(train_num) or 
                 realtime_map.get(no_prefix) or 
-                realtime_map.get(f"{direction_key}_{digits}") or 
                 realtime_map.get(digits)
             )
             eval_res["current_loc"] = loc
@@ -442,8 +439,38 @@ def handle_message(event):
     user_text = event.message.text.strip()
     user_id = getattr(event.source, 'user_id', None)
     
+    # 🧪 デバッグコマンド
+    if "デバッグ" in user_text:
+        params = {
+            "acl:consumerKey": ODPT_CONSUMER_KEY,
+            "odpt:railway": RAILWAY_ID,
+        }
+        try:
+            res = requests.get(ODPT_TRAIN_LOCATION_URL, params=params, timeout=5)
+            if res.status_code == 200 and isinstance(res.json(), list):
+                raw_trains = res.json()
+                summary_lines = []
+                for t in raw_trains:
+                    t_num = t.get("odpt:trainNumber", "不明")
+                    from_st = str(t.get("odpt:fromStation", "")).split(".")[-1]
+                    to_st = str(t.get("odpt:toStation", "")).split(".")[-1]
+                    summary_lines.append(f"・{t_num}: {from_st}➔{to_st}")
+                
+                reply_text = (
+                    f"🧪【ODPT リアルタイム位置 デバッグ】\n"
+                    f"HTTPステータス: 200 OK\n"
+                    f"現在走行中の電車数: {len(raw_trains)}本\n\n"
+                    f"▼ 走行中電車一覧:\n" + "\n".join(summary_lines[:10])
+                )
+            else:
+                reply_text = f"🧪【デバッグ】API応答エラー: Status {res.status_code}\n{res.text[:200]}"
+        except Exception as e:
+            reply_text = f"🧪【デバッグ】例外エラー発生: {e}"
+        
+        reply_message = TextMessage(text=reply_text)
+
     # 1. 位置情報送信要求判定
-    if "現在地" in user_text:
+    elif "現在地" in user_text:
         reply_message = TextMessage(
             text="📍 下のボタンをタップして位置情報を送信してください。",
             quick_reply=QuickReply(
