@@ -25,6 +25,23 @@ app = Flask(__name__)
 JST = timezone(timedelta(hours=9))
 user_last_station = {}  # { user_id: station_info }
 
+# ガイドメッセージ
+HELP_MESSAGE = (
+    "📖【南北線案内Botの使い方】\n\n"
+    "① 駅名で検索する\n"
+    "   「王子」「飯田橋」などの駅名を送信すると、その駅の最新時刻表を表示します。\n"
+    "   例：「溜池山王 18:30」のように時間指定も可能です。\n\n"
+    "② リッチメニューで一発表示\n"
+    "   ・🏠 赤羽岩淵(上り)：赤羽岩淵の目黒方面を表示\n"
+    "   ・🏢 溜池山王(下り)：溜池山王の浦和美園方面を表示\n"
+    "   ・🚃 目黒方面/浦和美園方面：選択中の駅のまま方向を切り替え\n\n"
+    "③ 位置情報から最寄り駅を検索\n"
+    "   「📍 現在地から検索」を押して位置情報を送信すると、一番近い南北線の駅を自動検索します。\n\n"
+    "💡【表示マークの見方】\n"
+    "🪑[当駅始発]：座れる可能性が高い始発電車です。\n"
+    "編成/車両：6両・8両や運行会社（東急・相鉄・メトロ等）を表示します。"
+)
+
 # ==============================================================================
 # 1. 各種APIキー設定（環境変数）
 # ==============================================================================
@@ -97,7 +114,6 @@ def find_nearest_station(user_lat, user_lon):
     return closest_station, int(min_dist_km * 1000)
 
 def find_station_by_text(user_text: str):
-    # 方向指定キーワードを事前に除外して「純粋な駅名」を判定
     cleaned_text = re.sub(r'(目黒方面|浦和美園方面|赤羽岩淵方面|上り|下り)', '', user_text).strip()
     if not cleaned_text:
         return None
@@ -317,28 +333,32 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    user_text = event.message.text
+    user_text = event.message.text.strip()
     user_id = getattr(event.source, 'user_id', None)
     
-    # 1. 入力メッセージから駅を検索
-    matched_station = find_station_by_text(user_text)
-    
-    # 2. 駅名が含まれていれば状態保持、なければ前回の検索駅を使用
-    if matched_station:
-        if user_id:
-            user_last_station[user_id] = matched_station
+    # 「使い方」「ヘルプ」判定
+    if any(kw in user_text for kw in ["使い方", "つかいかた", "ヘルプ", "help", "ガイド"]):
+        reply_text = HELP_MESSAGE
     else:
-        if user_id and user_id in user_last_station:
-            matched_station = user_last_station[user_id]
+        # 1. 入力メッセージから駅を検索
+        matched_station = find_station_by_text(user_text)
+        
+        # 2. 駅名が含まれていれば状態保持、なければ前回の検索駅を使用
+        if matched_station:
+            if user_id:
+                user_last_station[user_id] = matched_station
+        else:
+            if user_id and user_id in user_last_station:
+                matched_station = user_last_station[user_id]
 
-    target_time = parse_time_input(user_text)
-    direction_key = parse_direction(user_text)
+        target_time = parse_time_input(user_text)
+        direction_key = parse_direction(user_text)
 
-    reply_text = build_timetable_message(
-        station_info=matched_station,
-        target_time_str=target_time,
-        direction_key=direction_key
-    )
+        reply_text = build_timetable_message(
+            station_info=matched_station,
+            target_time_str=target_time,
+            direction_key=direction_key
+        )
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
