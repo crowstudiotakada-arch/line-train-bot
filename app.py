@@ -32,7 +32,7 @@ user_last_station = {}  # { user_id: station_info }
 HELP_MESSAGE = (
     "📖【南北線案内Botの使い方】\n\n"
     "① 駅名で検索する\n"
-    "   「王子」「飯田橋」などの駅名を送信すると、その駅の最新時刻表を表示します。\n"
+    "   「王子」「飯田橋」などの駅名を送信すると、その駅の最新時刻表と【待っている電車のリアルタイム現在地】を表示します。\n"
     "   例：「溜池山王 18:30」のように時間指定も可能です。\n\n"
     "② リッチメニューで一発表示\n"
     "   ・🏠 赤羽岩淵(上り)：赤羽岩淵の目黒方面を表示\n"
@@ -41,6 +41,7 @@ HELP_MESSAGE = (
     "③ 位置情報から最寄り駅を検索\n"
     "   「📍 現在地から検索」を押すと表示されるボタンから位置情報を送信すると、一番近い南北線の駅を自動検索します。\n\n"
     "💡【表示マークの見方】\n"
+    "📍 現在地：待っている電車が今どの区間を走っているかリアルタイム表示\n"
     "🪑[当駅始発]：座れる可能性が高い始発電車です。\n"
     "編成/車両：6両・8両や運行会社（東急・相鉄・メトロ等）を表示します。\n\n"
     "⚠️【応答に時間がかかる場合】\n"
@@ -61,6 +62,8 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # API エンドポイント
 ODPT_STATION_TIMETABLE_URL = "https://api.odpt.org/api/v4/odpt:StationTimetable"
 ODPT_TRAIN_TIMETABLE_URL = "https://api.odpt.org/api/v4/odpt:TrainTimetable"
+ODPT_TRAIN_INFO_URL = "https://api.odpt.org/api/v4/odpt:TrainInformation"
+ODPT_TRAIN_LOCATION_URL = "https://api.odpt.org/api/v4/odpt:Train"
 RAILWAY_ID = "odpt.Railway:TokyoMetro.Namboku"
 
 # ==============================================================================
@@ -87,6 +90,8 @@ STATIONS_GEO = [
     {"name": "志茂", "id": "odpt.Station:TokyoMetro.Namboku.Shimo", "lat": 35.7779, "lon": 139.7326, "aliases": ["志茂", "しも"]},
     {"name": "赤羽岩淵", "id": "odpt.Station:TokyoMetro.Namboku.AkabaneIwabuchi", "lat": 35.7836, "lon": 139.7214, "aliases": ["赤羽岩淵", "赤羽", "あかばねいわぶち"]},
 ]
+
+STATION_ID_TO_NAME = {st["id"]: st["name"] for st in STATIONS_GEO}
 
 STATION_NAME_MAP = {
     # 目黒方面
@@ -158,7 +163,57 @@ def parse_time_input(user_text: str):
     return None
 
 # ==============================================================================
-# 4. 両数・編成判定ロジック
+# 4. 運行障害・遅延情報 & リアルタイム列車位置 照合辞書取得
+# ==============================================================================
+def fetch_train_information() -> str:
+    """南北線の運行情報を取得"""
+    params = {
+        "acl:consumerKey": ODPT_CONSUMER_KEY,
+        "odpt:railway": RAILWAY_ID,
+    }
+    try:
+        res = requests.get(ODPT_TRAIN_INFO_URL, params=params, timeout=5)
+        if res.status_code == 200 and res.json():
+            info = res.json()[0]
+            text_dict = info.get("odpt:trainInformationText", {})
+            ja_text = text_dict.get("ja", "平常通り運行しています。")
+            return ja_text
+    except Exception:
+        pass
+    return "運行情報の取得に失敗しました。"
+
+def fetch_realtime_train_map() -> dict:
+    """全電車のリアルタイム現在地を列車番号キーの辞書で取得"""
+    params = {
+        "acl:consumerKey": ODPT_CONSUMER_KEY,
+        "odpt:railway": RAILWAY_ID,
+    }
+    train_map = {}
+    try:
+        res = requests.get(ODPT_TRAIN_LOCATION_URL, params=params, timeout=5)
+        if res.status_code == 200 and res.json():
+            for t in res.json():
+                t_num = t.get("odpt:trainNumber", "").upper()
+                from_st_id = t.get("odpt:fromStation", "")
+                to_st_id = t.get("odpt:toStation", "")
+                delay_sec = t.get("odpt:delay", 0)
+
+                from_name = STATION_ID_TO_NAME.get(from_st_id, from_st_id.split(".")[-1])
+                to_name = STATION_ID_TO_NAME.get(to_st_id, "") if to_st_id else ""
+
+                if to_name and to_name != from_name:
+                    loc_str = f"{from_name} ➔ {to_name} (走行中)"
+                else:
+                    loc_str = f"{from_name} (停車中)"
+
+                delay_str = f" ⚠️{delay_sec//60}分遅れ" if delay_sec >= 60 else ""
+                train_map[t_num] = f"{loc_str}{delay_str}"
+    except Exception:
+        pass
+    return train_map
+
+# ==============================================================================
+# 5. 両数・編成判定ロジック
 # ==============================================================================
 def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool) -> dict:
     train_number = train_number.upper()
@@ -209,7 +264,7 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
     }
 
 # ==============================================================================
-# 5. 時刻表取得ロジック
+# 6. 時刻表取得＆ピンポイント位置紐付けロジック
 # ==============================================================================
 def get_origin_train_numbers(target_station_id: str) -> set:
     params = {
@@ -243,10 +298,18 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
 
     direction_title = "目黒方面(上り)" if direction_key == "MEGURO" else "赤羽岩淵・浦和美園方面(下り)"
 
-    # 1. 始発電車番号リストを取得
+    # 1. 運行情報＆リアルタイム列車位置マップを取得
+    train_info_text = fetch_train_information()
+    realtime_map = fetch_realtime_train_map()
+
+    info_header = ""
+    if "平常通り" not in train_info_text and "平常運転" not in train_info_text:
+        info_header = f"🚨【遅延・障害情報】\n{train_info_text}\n" + "─" * 20 + "\n"
+
+    # 2. 始発電車番号リストを取得
     origin_train_numbers = get_origin_train_numbers(target_station_id)
 
-    # 2. 駅発車時刻表を取得
+    # 3. 駅発車時刻表を取得
     params_st = {
         "acl:consumerKey": ODPT_CONSUMER_KEY,
         "odpt:station": target_station_id,
@@ -279,7 +342,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
                 break
 
     if not matched_entry:
-        return f"🚃 {target_station_name}駅発（{direction_title}）\n該当する方向の時刻表データが存在しません。"
+        return f"{info_header}🚃 {target_station_name}駅発（{direction_title}）\n該当する方向の時刻表データが存在しません。"
 
     timetable_objects = matched_entry.get("odpt:stationTimetableObject", [])
 
@@ -299,22 +362,30 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
 
             eval_res = analyze_car_length(train_num, dest_raw, is_origin)
             eval_res["departure_time"] = dep_time
+            # ピンポイント現在地を照合して付与
+            eval_res["current_loc"] = realtime_map.get(train_num, None)
             upcoming_trains.append(eval_res)
 
     upcoming_trains.sort(key=lambda x: x["departure_time"])
     selected_trains = upcoming_trains[:5]
 
     if not selected_trains:
-        return f"🚃 {target_station_name}駅発（{direction_title}）\n時刻 ({now_str}) 以降の発車予定はありません。"
+        return f"{info_header}🚃 {target_station_name}駅発（{direction_title}）\n時刻 ({now_str}) 以降の発車予定はありません。"
 
-    lines = [
+    lines = [info_header] if info_header else []
+    lines.extend([
         f"🚃 {target_station_name}駅発【{direction_title}】発車案内",
         f"⏰ 基準時刻: {now_str}\n"
-    ]
+    ])
 
     for t in selected_trains:
         origin_tag = " 🪑[当駅始発]" if t["is_origin"] else ""
         lines.append(f"🕒 {t['departure_time']}発【{t['destination']} 行】{origin_tag}")
+        
+        # 現在地データが存在する場合のみ表示
+        if t["current_loc"]:
+            lines.append(f" ├ 📍 現在地: {t['current_loc']}")
+
         lines.append(f" ├ 編成: {t['cars']}")
         lines.append(f" ├ 車両: {t['company']} ({t['train_number']})")
         lines.append(f" └ {t['recommendation']}")
@@ -323,7 +394,7 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
     return "\n".join(lines)
 
 # ==============================================================================
-# 6. LINE Webhook サーバー処理
+# 7. LINE Webhook サーバー処理
 # ==============================================================================
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -342,7 +413,7 @@ def handle_message(event):
     user_text = event.message.text.strip()
     user_id = getattr(event.source, 'user_id', None)
     
-    # 1. 「位置情報送信要求」判定（リッチメニューの現在地ボタンを押した時）
+    # 1. 位置情報送信要求判定
     if "現在地" in user_text:
         reply_message = TextMessage(
             text="📍 下のボタンをタップして位置情報を送信してください。",
@@ -354,10 +425,16 @@ def handle_message(event):
                 ]
             )
         )
-    # 2. 「使い方」「ヘルプ」判定
+    # 2. 運行情報・遅延情報判定
+    elif any(kw in user_text for kw in ["運行情報", "遅延", "遅れ", "運行状況"]):
+        info_text = fetch_train_information()
+        reply_message = TextMessage(text=f"📢【南北線 運行情報】\n\n{info_text}")
+
+    # 3. 「使い方」「ヘルプ」判定
     elif any(kw in user_text for kw in ["使い方", "つかいかた", "ヘルプ", "help", "ガイド"]):
         reply_message = TextMessage(text=HELP_MESSAGE)
-    # 3. 通常の駅検索
+
+    # 4. 通常の駅時刻表検索（リアルタイムピンポイント現在地付き）
     else:
         matched_station = find_station_by_text(user_text)
         
