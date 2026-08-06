@@ -13,11 +13,7 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage,
-    QuickReply,
-    QuickReplyItem,
-    MessageAction,
-    LocationAction
+    TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, LocationMessageContent
 
@@ -79,7 +75,7 @@ STATION_NAME_MAP = {
 }
 
 # ==============================================================================
-# 3. 解析＆検索補助ロジック（バグ修正版）
+# 3. 解析＆検索補助ロジック
 # ==============================================================================
 def calculate_distance_km(lat1, lon1, lat2, lon2):
     R = 6371.0
@@ -100,7 +96,6 @@ def find_nearest_station(user_lat, user_lon):
     return closest_station, int(min_dist_km * 1000)
 
 def find_station_by_text(user_text: str):
-    """最長一致で駅名を判定（例: 「赤羽岩淵 目黒方面」で「赤羽岩淵」を「目黒」より優先）"""
     cleaned_text = user_text.strip()
     matches = []
     for st in STATIONS_GEO:
@@ -113,7 +108,6 @@ def find_station_by_text(user_text: str):
     return None
 
 def parse_direction(user_text: str) -> str:
-    """明示的な方向キーワードを最優先判定"""
     if any(kw in user_text for kw in ["目黒方面", "上り", "目黒行"]):
         return "MEGURO"
     if any(kw in user_text for kw in ["浦和美園方面", "下り", "美園行", "赤羽岩淵方面"]):
@@ -135,33 +129,6 @@ def parse_time_input(user_text: str):
         min_val = int(m2.group(2)) if m2.group(2) else 0
         return f"{h:02d}:{min_val:02d}"
     return None
-
-def create_quick_reply(station_name: str = None):
-    prefix = f"{station_name} " if station_name else ""
-    return QuickReply(
-        items=[
-            # 1. 赤羽岩淵 (上り: 目黒方面)
-            QuickReplyItem(
-                action=MessageAction(label="🏠 赤羽岩淵(上り)", text="赤羽岩淵 目黒方面")
-            ),
-            # 2. 溜池山王 (下り: 浦和美園方面)
-            QuickReplyItem(
-                action=MessageAction(label="🏢 溜池山王(下り)", text="溜池山王 浦和美園方面")
-            ),
-            # 3. 目黒方面 (上り)［現在選択中の駅］
-            QuickReplyItem(
-                action=MessageAction(label="🚃 目黒方面(上り)", text=f"{prefix}目黒方面")
-            ),
-            # 4. 浦和美園方面 (下り)［現在選択中の駅］
-            QuickReplyItem(
-                action=MessageAction(label="🚃 浦和美園方面(下り)", text=f"{prefix}浦和美園方面")
-            ),
-            # 5. 現在地から検索
-            QuickReplyItem(
-                action=LocationAction(label="📍 現在地から検索")
-            ),
-        ]
-    )
 
 # ==============================================================================
 # 4. 両数・編成判定ロジック
@@ -326,8 +293,6 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
         lines.append(f" └ {t['recommendation']}")
         lines.append("-" * 20)
 
-    lines.append("👇 下のボタンをタップしてワンタップ切替")
-
     return "\n".join(lines)
 
 # ==============================================================================
@@ -359,18 +324,13 @@ def handle_message(event):
         direction_key=direction_key
     )
 
-    current_station_name = matched_station["name"] if matched_station else "赤羽岩淵"
-
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
                 messages=[
-                    TextMessage(
-                        text=reply_text,
-                        quick_reply=create_quick_reply(station_name=current_station_name)
-                    )
+                    TextMessage(text=reply_text)
                 ]
             )
         )
@@ -393,10 +353,7 @@ def handle_location(event):
             ReplyMessageRequest(
                 reply_token=event.reply_token,
                 messages=[
-                    TextMessage(
-                        text=reply_text,
-                        quick_reply=create_quick_reply(station_name=nearest_station["name"])
-                    )
+                    TextMessage(text=reply_text)
                 ]
             )
         )
