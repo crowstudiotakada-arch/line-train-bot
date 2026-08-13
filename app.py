@@ -103,7 +103,7 @@ STATION_NAME_MAP = {
 }
 
 # ==============================================================================
-# 3. 日本の祝日・振替休日 自動判定ロジック
+# 3. 日本の祝日・特別ダイヤ（お盆・年末年始）自動判定ロジック
 # ==============================================================================
 def get_japanese_holidays(year: int) -> set:
     """指定された年の日本の全祝日・振替休日・国民の休日を計算"""
@@ -125,7 +125,7 @@ def get_japanese_holidays(year: int) -> set:
     for m, d in fixed:
         holidays.add(date(year, m, d))
 
-    # 春分の日・秋分の日（1980年〜2099年対応天文計算式）
+    # 春分の日・秋分の日（1980年〜2099年対応計算式）
     vernal_day = int(20.8431 + 0.242194 * (year - 1980) - int((year - 1980) / 4))
     autumnal_day = int(23.2488 + 0.242194 * (year - 1980) - int((year - 1980) / 4))
     holidays.add(date(year, 3, vernal_day))
@@ -142,7 +142,7 @@ def get_japanese_holidays(year: int) -> set:
     holidays.add(happy_monday(9, 3))  # 敬老の日 (9月第3月曜)
     holidays.add(happy_monday(10, 2)) # スポーツの日 (10月第2月曜)
 
-    # 3. 振替休日（祝日が日曜日の場合、翌日以降の最初の平日）
+    # 3. 振替休日
     substitutes = set()
     for h in sorted(list(holidays)):
         if h.weekday() == 6:  # 日曜日
@@ -152,7 +152,7 @@ def get_japanese_holidays(year: int) -> set:
             substitutes.add(sub)
     holidays.update(substitutes)
 
-    # 4. 国民の休日（祝日と祝日に挟まれた平日）
+    # 4. 国民の休日
     citizens_holidays = set()
     sorted_hols = sorted(list(holidays))
     for i in range(len(sorted_hols) - 1):
@@ -166,10 +166,25 @@ def get_japanese_holidays(year: int) -> set:
 
     return holidays
 
-def is_japanese_holiday(dt_date: date) -> bool:
-    """指定日付が祝日かどうか判定"""
+def is_special_holiday_period(dt_date: date) -> bool:
+    """お盆期間(8/13-8/15)および年末年始期間(12/29-1/3)の判定"""
+    m, d = dt_date.month, dt_date.day
+    # お盆期間
+    if m == 8 and 13 <= d <= 15:
+        return True
+    # 年末年始期間
+    if (m == 12 and d >= 29) or (m == 1 and d <= 3):
+        return True
+    return False
+
+def is_weekend_or_holiday(dt_date: date) -> bool:
+    """土日・祝日・お盆・年末年始かどうかを判定"""
+    if dt_date.weekday() >= 5:  # 土曜日(5)・日曜日(6)
+        return True
+    if is_special_holiday_period(dt_date):  # お盆・年末年始
+        return True
     holidays = get_japanese_holidays(dt_date.year)
-    return dt_date in holidays
+    return dt_date in holidays  # 国民の祝日
 
 # ==============================================================================
 # 4. 時刻・日付計算（朝4時基準の24時間管理＆休日判定）
@@ -214,9 +229,9 @@ def get_current_time_info(target_time_str: str = None):
             adj_minutes = h * 60 + m
         display_str = f"{h:02d}:{m:02d}"
 
-    # 土曜日・日曜日 または 日本の祝日の場合は「土休日ダイヤ」を適用
-    is_weekend_or_holiday = (effective_dt.weekday() >= 5) or is_japanese_holiday(effective_dt.date())
-    calendar_key = "odpt.Calendar:SaturdayHoliday" if is_weekend_or_holiday else "odpt.Calendar:Weekday"
+    # 土日・祝日・お盆・年末年始の場合は「土休日ダイヤ」を適用
+    is_holiday_mode = is_weekend_or_holiday(effective_dt.date())
+    calendar_key = "odpt.Calendar:SaturdayHoliday" if is_holiday_mode else "odpt.Calendar:Weekday"
 
     return adj_minutes, display_str, calendar_key
 
