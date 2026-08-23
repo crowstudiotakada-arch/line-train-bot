@@ -44,7 +44,7 @@ HELP_MESSAGE = (
     "   「📍 現在地から検索」を押すと表示されるボタンから位置情報を送信すると、一番近い南北線の駅を自動検索します。\n\n"
     "💡【表示マークの見方】\n"
     "🪑[当駅始発]：座れる可能性が高い始発電車です。\n"
-    "編成/車両：6両・8両や運行会社（東急・相鉄・メトロ等）を表示します。\n\n"
+    "編成/車両：6両・8両や運行会社（東急・相鉄・メトロ・埼玉高速）を自動判定して表示します。\n\n"
     "⚠️【応答に時間がかかる場合】\n"
     "サーバーが休止状態（スリープ）の場合、初回の返信に15〜30秒ほどお時間をいただくことがあります。\n"
     "反応がない場合は、お手数ですが1分後にもう一度送信・タップしてみてください！"
@@ -311,7 +311,7 @@ def fetch_train_information() -> str:
     return "平常通り運行しています。"
 
 # ==============================================================================
-# 6. 両数・編成判定ロジック
+# 6. 両数・編成判定ロジック（正しい運用記号版）
 # ==============================================================================
 def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool) -> dict:
     train_number = train_number.upper()
@@ -324,7 +324,15 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
     if is_origin:
         recommendations.append("✨【当駅始発】座れる可能性大！")
 
-    if suffix == "K":
+    if suffix == "S":
+        company = "東京メトロ"
+        cars = "6両 または 8両"
+        recommendations.append("メトロ車（順次8両化中）")
+    elif suffix == "M":
+        company = "埼玉高速鉄道"
+        cars = "6両"
+        recommendations.append("埼玉高速車（6両固定）")
+    elif suffix == "K":
         company = "東急電鉄"
         cars = "8両"
         recommendations.append("全列車8両編成")
@@ -332,14 +340,6 @@ def analyze_car_length(train_number: str, destination_raw: str, is_origin: bool)
         company = "相鉄"
         cars = "8両"
         recommendations.append("全列車8両（ネイビーブルー車両）")
-    elif suffix == "S":
-        company = "埼玉高速鉄道"
-        cars = "6両"
-        recommendations.append("6両編成（混雑注意）")
-    elif suffix == "M":
-        company = "東京メトロ"
-        cars = "6両 または 8両"
-        recommendations.append("メトロ車（順次8両化中）")
     else:
         company = "その他"
         cars = "不明"
@@ -503,7 +503,7 @@ def handle_message(event):
     user_text = event.message.text.strip()
     user_id = getattr(event.source, 'user_id', None)
     
-    # 1. 位置情報送信要求判定
+    # 1. 位置情報送信要求判定（リッチメニューの現在地ボタンを押した時）
     if "現在地" in user_text:
         reply_message = TextMessage(
             text="📍 下のボタンをタップして位置情報を送信してください。",
