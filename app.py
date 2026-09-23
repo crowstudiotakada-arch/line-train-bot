@@ -486,6 +486,10 @@ def build_timetable_message(station_info: dict = None, target_time_str: str = No
 # ==============================================================================
 # 8. LINE Webhook サーバー処理
 # ==============================================================================
+@app.route("/", methods=["GET"])
+def health_check():
+    return "OK", 200
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature', '')
